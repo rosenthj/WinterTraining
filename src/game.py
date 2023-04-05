@@ -3,7 +3,6 @@ import chess
 
 class ItGame:
     def __init__(self, game):
-        assert isinstance(game, chess.Game)
         self._board = game.board().copy()
         self._headers = game.headers.copy()
         self._umake = []
@@ -46,9 +45,14 @@ class ItGame:
             return self._board.is_capture(self._umake[-1])
         return False
 
+    def __next_is_en_passant(self):
+        if self._umake:
+            return self._board.is_en_passant(self._umake[-1])
+        return False
+
     def to_start(self):
-        assert self._umake != None
-        while self.unmake_move():
+        assert (self._umake != None)
+        while (self.unmake_move()):
             continue
 
     def castling_rights(self):
@@ -58,8 +62,9 @@ class ItGame:
         return self._board.halfmove_clock
 
     def is_quiet(self):
-        return not self.in_check() and ((self._board.halfmove_clock or not self.__last_is_capture()) or not (
-                    self.__next_is_check() or self.__next_is_capture()))
+        return not self.in_check() and not self.__next_is_en_passant() and (
+                    (self._board.halfmove_clock or not self.__last_is_capture()) or not (
+                        self.__next_is_check() or self.__next_is_capture()))
 
     def is_final_position(self):
         return len(self._umake) == 0
@@ -75,3 +80,4 @@ class ItGame:
 
     def print_board(self):
         print(self._board)
+
