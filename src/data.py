@@ -4,6 +4,7 @@ import scipy
 import torch
 
 from game import ItGame
+from src import loader
 from utils import get_standardised_board_and_result
 
 
@@ -58,27 +59,11 @@ def load_all_games(pgn_filename, f=None):
             lst.append(g)
         # g = load_next_game(pgn)
         g = chess.pgn.read_game(pgn)
-        if (len(lst) % 5000) == 0:  # or (len(lst) > 15700 and len(lst) < 15800):
+        if (len(lst) % 25000) == 0:
             print("Loaded {} games".format(len(lst)))
-            if len(lst) >= 365000:
-                break
     pgn.close()
     print("Finished loading {} games".format(len(lst)))
     return lst
-
-
-def add_tag(pgn_in: str = "./../Data/CCRL-404FRC.pgn", pgn_out: str = "./../Data/CCRL-404FRCv2.pgn"):
-    """Add pgn tag to input pgn and store to output pgn"""
-    pgn = open(pgn_in, "r")
-    pgno = open(pgn_out, "w")
-    for line in pgn:
-        if "FEN" in line and "-\"" in line:
-            lp = line.split("\"")
-            line = "{}\"{} 0 1\"{}".format(lp[0], lp[1], lp[2])
-        if "Variant" not in line:
-            pgno.write(line)
-        if "Result" in line:
-            pgno.write("[Variant \"chess 960\"]\n")
 
 
 def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False):
@@ -135,17 +120,6 @@ def gen_dataset_from_pgn(path="./../Data/CCRL-404FRCv2.pgn"):
     return scipy.sparse.vstack(f), np.concatenate(r)
 
 
-def load_features_results(name):
-    features = scipy.sparse.load_npz(f"{name}_features.npz")
-    results = np.load(f"{name}_targets.npz")['arr_0']
-    return features, results
-
-
-def load_dataset(name, batch_size=16, shuffle=True):
-    features, results = load_features_results(name)
-    return torch.utils.data.DataLoader(CSRDataset(features,results), batch_size=batch_size, shuffle=shuffle)
-
-
 def gen_dataset_helper(name, batch_size=16, shuffle=True, save=False):
     features, results = gen_dataset_from_pgn(f"./../Data/{name}.pgn")
     if save:
@@ -159,13 +133,17 @@ def gen_subset_dataset(features, results, n, m=1):
     return features[idx], results[idx]
 
 
-class CSRDataset:
-    def __init__(self, features, targets):
-        self.features = features
-        self.targets = targets
+def load_desk(num, generate, save_dir="./"):
+    if generate:
+        fd, rd = gen_dataset_from_pgn(f"./../Data/dfrc-self-play-v{num}.pgn")
+        scipy.sparse.save_npz(f"{save_dir}features_desk_v{num}.npz", fd)
+        np.savez(f"{save_dir}targets_desk_v{num}.npz", rd)
+    else:
+        fd = scipy.sparse.load_npz(f"{save_dir}features_desk_v{num}.npz")
+        rd = np.load(f"{save_dir}targets_desk_v{num}.npz")['arr_0']
+    return fd, rd
 
-    def __getitem__(self, index):
-        return np.squeeze(np.asarray(self.features[index].todense())), self.targets[index]
 
-    def __len__(self):
-        return self.features.shape[0]
+def load_and_merge_desk(num, generate, old_tag, new_tag):
+    fd, rd = load_desk(num, generate)
+    return loader.merge_desk(fd, rd, old_tag, new_tag)
