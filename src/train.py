@@ -128,8 +128,8 @@ def train(model, name, train_loader, epochs, optimizer=None, lr=0.01, log_freq=1
           loss=F.mse_loss, initial_epoch=0, test_loader=None):
     if optimizer is None:
         optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-    if not os.path.exists(f"Models/{name}"):
-        os.makedirs(f"Models/{name}")
+    if not os.path.exists(f"../models/{name}"):
+        os.makedirs(f"../models/{name}")
     for epoch in range(initial_epoch, initial_epoch + epochs):
         if epoch != initial_epoch:
             print()
@@ -137,14 +137,14 @@ def train(model, name, train_loader, epochs, optimizer=None, lr=0.01, log_freq=1
             f"Epoch {epoch + 1}--Training on {len(train_loader.dataset)} samples----------------------------------------------------")
         train_epoch(model, optimizer, train_loader, log_freq=log_freq, rng_piece_positions=rng_piece_positions,
                     base_loss=loss, test_loader=test_loader)
-        torch.save(model.state_dict(), f"Models/{name}/{name}_ep{epoch + 1}.pt")
-        model.serialize(f"Models/{name}/{name}_ep{epoch + 1}.bin", verbose=1)
+        torch.save(model.state_dict(), f"../models/{name}/{name}_ep{epoch + 1}.pt")
+        model.serialize(f"../models/{name}/{name}_ep{epoch + 1}.bin", verbose=1)
         if test_loader is not None:
             print(f"Finished Epoch {epoch + 1}. {gen_validation_string(model, test_loader)}")
 
 
 def load_weights(model, name, ep):
-    model.load_state_dict(torch.load(f"Models/{name}/{name}_ep{ep}.pt"))
+    model.load_state_dict(torch.load(f"../models/{name}/{name}_ep{ep}.pt"))
 
 
 def load_partial_model_weights(model, helper_model, n):

@@ -41,7 +41,7 @@ def add_ocb(features):
     one_w_b = (features[:, (2*64):(3*64)].sum(axis=1) == 1)
     one_b_b = (features[:, (8*64):(9*64)].sum(axis=1) == 1)
     ds_b = 0
-    for idx in [0,2,4,6,9,11,13,15]:
+    for idx in [0, 2, 4, 6, 9, 11, 13, 15]:
         ds_b += features[:, (idx+2*64):(3*64):16].sum(axis=1) + features[:, (idx+8*64):(9*64):16].sum(axis=1)
     one_ds_b = ds_b == 1
     ocb = scipy.sparse.csr_matrix((one_w_b & one_b_b & one_ds_b).astype(np.int8))
