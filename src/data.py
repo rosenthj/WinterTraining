@@ -5,7 +5,8 @@ import torch
 
 from game import ItGame
 from src import loader
-from utils import get_standardised_board_and_result
+from src.loader import CSRDataset
+from chess_utils import get_standardised_board_and_result
 
 
 def load_next_game(pgn, print_headers=False):

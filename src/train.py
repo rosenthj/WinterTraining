@@ -1,10 +1,7 @@
-import chess
 import numpy as np
 import os
 import torch
 import torch.nn.functional as F
-
-from data import get_features
 
 
 def loss_f(pred, target, base_loss=F.mse_loss):
@@ -38,43 +35,6 @@ def randomize_piece_positions(x, randomization):
         ub = (i + 1) * 64
         x[:, lb:ub] = x[:, lb:ub][:, torch.randperm(64)]
     return x
-
-
-def get_board_from_tensor(board_tensor):
-    assert len(board_tensor.shape) == 1 and board_tensor.shape[0] == 772
-    board = chess.Board(chess960=True)
-    board.clear()
-    for square in range(64):
-        for piecetype in range(12):
-            if board_tensor[piecetype * 64 + square] != 0:
-                board.set_piece_at(square, chess.Piece(1 + (piecetype % 6), 1 - piecetype // 6))
-    return board
-
-
-def get_boards_and_targets(loader, max_count=100):
-    boards_and_targets = []
-    for (data, target) in loader:
-        for i in range(data.shape[0]):
-            boards_and_targets.append((get_board_from_tensor(data[i]), target[i:i + 1], data[i:i + 1].detach()))
-            if len(boards_and_targets) >= max_count:
-                return boards_and_targets
-    return boards_and_targets
-
-
-def get_startpos_tensor():
-    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-    feat, res = get_features(fen, "1-0", cond_h_flip=False)
-    dense = np.squeeze(np.asarray(feat.todense()))
-    return torch.Tensor(dense).view(1, 772)
-
-
-def get_startpos_eval(model):
-    training = model.training
-    model.eval()
-    with torch.no_grad():
-        pred = model(get_startpos_tensor())[0]
-    model.train(training)
-    return pred, 0.5 + (pred[0] - pred[2]) / 2
 
 
 def test(model, test_loader, base_loss=F.mse_loss):
@@ -122,9 +82,10 @@ def gen_mirror_dataset(data_loader, count):
 
 def gen_validation_string(model, validation_loader):
     test_loss = test(model, validation_loader, base_loss=[F.mse_loss, F.l1_loss])
-    start_pred, start_eval = get_startpos_eval(model)
-    wdl_str = f"({start_pred[0]:.4f}/{start_pred[1]:.4f}/{start_pred[2]:.4f})"
-    return f"Val mse:{test_loss[0]:.6f}, Val l1:{test_loss[1]:.6f}, Start WDL:{wdl_str}=>{start_eval:.5f}"
+    # start_pred, start_eval = get_startpos_eval(model)
+    # wdl_str = f"({start_pred[0]:.4f}/{start_pred[1]:.4f}/{start_pred[2]:.4f})"
+    # return f"Val mse:{test_loss[0]:.6f}, Val l1:{test_loss[1]:.6f}, Start WDL:{wdl_str}=>{start_eval:.5f}"
+    return f"Val mse:{test_loss[0]:.6f}, Val l1:{test_loss[1]:.6f}"
 
 
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
