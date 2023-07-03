@@ -13,12 +13,6 @@ def loss_combined(pred_logit, target, base_loss=F.mse_loss):
     return loss_f(pred, target, base_loss) + 0.04 * F.cross_entropy(pred_logit, target)
 
 
-# def loss_custom_ce(pred, target):
-# pred[:,1] = 1-torch.abs(pred[:,0]-pred[:,2])
-# target = F.one_hot(target, num_classes=3)
-# return F.binary_cross_entropy(pred, target, weight=custom_ce_loss_weights)
-
-
 def randomize_piece_positions(x, randomization):
     if isinstance(randomization, bool):
         if not randomization:
