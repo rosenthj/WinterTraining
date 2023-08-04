@@ -3,6 +3,8 @@ import os
 import torch
 import torch.nn.functional as F
 
+from utils import log
+
 
 def loss_f(pred, target, base_loss=F.mse_loss):
     return base_loss(pred[:, 0] - pred[:, 2], 1.0 - target)
@@ -113,7 +115,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             batch_res_str = f"Batch {count} Recent:{(recent_loss / log_freq):.6f}, Total:{(loss_sum / count):.6f}"
             if test_loader is not None:
                 batch_res_str += ", " + gen_validation_string(model, test_loader)
-            print(batch_res_str)
+            log(batch_res_str)
             recent_loss = 0
     return loss_sum / count
 
@@ -127,14 +129,14 @@ def train(model, name, train_loader, epochs, optimizer=None, lr=0.01, log_freq=1
     for epoch in range(initial_epoch, initial_epoch + epochs):
         if epoch != initial_epoch:
             print()
-        print(
+        log(
             f"Epoch {epoch + 1}--Training on {len(train_loader.dataset)} samples----------------------------------------------------")
         train_epoch(model, optimizer, train_loader, log_freq=log_freq, rng_piece_positions=rng_piece_positions,
                     base_loss=loss, test_loader=test_loader)
         torch.save(model.state_dict(), f"../models/{name}/{name}_ep{epoch + 1}.pt")
         model.serialize(f"../models/{name}/{name}_ep{epoch + 1}.bin", verbose=1)
         if test_loader is not None:
-            print(f"Finished Epoch {epoch + 1}. {gen_validation_string(model, test_loader)}")
+            log(f"Finished Epoch {epoch + 1}. {gen_validation_string(model, test_loader)}")
 
 
 def load_weights(model, name, ep):
@@ -159,4 +161,4 @@ def scheduled_lr_train(model, model_save, data_loader, val_loader=None, init_lr=
               initial_epoch=(epochs_per_step * step), test_loader=val_loader)
         lr *= lr_mult
         step += 1
-        print(f"\nLearning rate updated to {lr}")
+        log(f"\nLearning rate updated to {lr}")
