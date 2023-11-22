@@ -1,3 +1,4 @@
+import config
 import numpy as np
 import os
 import torch
@@ -93,6 +94,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
     custom_ce_loss_weights = torch.Tensor([1.0, 0.2, 1.0])
     for (data, target) in train_loader:
         data = randomize_piece_positions(data, rng_piece_positions)
+        data, target = data.to(config.device), target.to(config.device)
         optimizer.zero_grad()
 
         # output = model(data.type(torch.float32), activate=True)
