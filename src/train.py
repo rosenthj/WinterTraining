@@ -86,7 +86,7 @@ def gen_validation_string(model, validation_loader):
 
 
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
-                test_loader=None):
+                test_loader=None, name=None):
     model.train()
     loss_sum = 0
     recent_loss = 0
@@ -118,8 +118,21 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             if test_loader is not None:
                 batch_res_str += ", " + gen_validation_string(model, test_loader)
             log(batch_res_str)
+            if name is not None:
+                save(model, name=name)
             recent_loss = 0
     return loss_sum / count
+
+
+def save(model, path=None, name=None, epoch=None):
+    if path is None:
+        assert name is not None
+        if epoch is None:
+            path = f"../models/{name}/{name}_tmp"
+        else:
+            path = f"../models/{name}/{name}_ep{epoch + 1}"
+    torch.save(model.state_dict(), f"{path}.pt")
+    model.serialize(f"{path}.bin", verbose=1)
 
 
 def train(model, name, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000, rng_piece_positions=False,
@@ -134,9 +147,10 @@ def train(model, name, train_loader, epochs, optimizer=None, lr=0.01, log_freq=1
         log(
             f"Epoch {epoch + 1}--Training on {len(train_loader.dataset)} samples----------------------------------------------------")
         train_epoch(model, optimizer, train_loader, log_freq=log_freq, rng_piece_positions=rng_piece_positions,
-                    base_loss=loss, test_loader=test_loader)
-        torch.save(model.state_dict(), f"../models/{name}/{name}_ep{epoch + 1}.pt")
-        model.serialize(f"../models/{name}/{name}_ep{epoch + 1}.bin", verbose=1)
+                    base_loss=loss, test_loader=test_loader, name=name)
+        save(model, f"../models/{name}/{name}_ep{epoch + 1}")
+        # torch.save(model.state_dict(), f"../models/{name}/{name}_ep{epoch + 1}.pt")
+        # model.serialize(f"../models/{name}/{name}_ep{epoch + 1}.bin", verbose=1)
         if test_loader is not None:
             log(f"Finished Epoch {epoch + 1}. {gen_validation_string(model, test_loader)}")
 

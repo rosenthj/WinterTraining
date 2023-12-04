@@ -1,3 +1,4 @@
+import os
 import config
 
 
@@ -15,9 +16,9 @@ def flip_result(result):
     return 2 - result
 
 
-def init_log_file(filename: str = "log.txt", mode = "a"):
+def init_log_file(filename: str = "log.txt", mode="a", log_path="../logs/"):
     assert config.log_file is None
-    config.log_file = open(filename, mode)
+    config.log_file = open(os.path.join(log_path, filename), mode)
 
 
 def close_log_file():
