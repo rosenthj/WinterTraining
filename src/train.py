@@ -43,7 +43,8 @@ def test(model, test_loader, base_loss=F.mse_loss):
     count = 0
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(test_loader):
-            output = model(data.type(torch.float32))
+            data, target = data.to(config.device), target.to(config.device)
+            output = model(data.type(torch.float32).to(config.device))
             for i in range(len(base_loss)):
                 loss = loss_f(output, target, base_loss=base_loss[i])
                 loss_sum[i] += loss.item()
