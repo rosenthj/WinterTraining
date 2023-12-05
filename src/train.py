@@ -136,20 +136,20 @@ def save(model, path=None, name=None, epoch=None):
     model.serialize(f"{path}.bin", verbose=1)
 
 
-def train(model, name, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000, rng_piece_positions=False,
+def train(model, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000, rng_piece_positions=False,
           loss=F.mse_loss, initial_epoch=0, test_loader=None):
     if optimizer is None:
         optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
-    if not os.path.exists(f"../models/{name}"):
-        os.makedirs(f"../models/{name}")
+    if not os.path.exists(f"../models/{config.name}"):
+        os.makedirs(f"../models/{config.name}")
     for epoch in range(initial_epoch, initial_epoch + epochs):
         if epoch != initial_epoch:
             print()
         log(
             f"Epoch {epoch + 1}--Training on {len(train_loader.dataset)} samples----------------------------------------------------")
         train_epoch(model, optimizer, train_loader, log_freq=log_freq, rng_piece_positions=rng_piece_positions,
-                    base_loss=loss, test_loader=test_loader, name=name)
-        save(model, f"../models/{name}/{name}_ep{epoch + 1}")
+                    base_loss=loss, test_loader=test_loader, name=config.name)
+        save(model, f"../models/{config.name}/{config.name}_ep{epoch + 1}")
         # torch.save(model.state_dict(), f"../models/{name}/{name}_ep{epoch + 1}.pt")
         # model.serialize(f"../models/{name}/{name}_ep{epoch + 1}.bin", verbose=1)
         if test_loader is not None:
@@ -168,13 +168,13 @@ def load_partial_model_weights(model, helper_model, n):
         model.out.bias[:n] = helper_model.out.bias
 
 
-def scheduled_lr_train(model, model_save, data_loader, val_loader=None, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
+def scheduled_lr_train(model, data_loader, val_loader=None, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
                        epochs_per_step=1, log_freq=100000):
     assert 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
     step = 0
     lr = init_lr
     while lr >= min_lr:
-        train(model, model_save, data_loader, epochs_per_step, lr=lr, log_freq=log_freq,
+        train(model, data_loader, epochs_per_step, lr=lr, log_freq=log_freq,
               initial_epoch=(epochs_per_step * step), test_loader=val_loader)
         lr *= lr_mult
         step += 1

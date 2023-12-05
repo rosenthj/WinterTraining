@@ -18,7 +18,10 @@ def flip_result(result):
 
 def init_log_file(filename: str = "log.txt", mode="a", log_path="../logs/"):
     assert config.log_file is None
-    config.log_file = open(os.path.join(log_path, filename), mode)
+    if config.name is None:
+        config.log_file = open(os.path.join(log_path, filename), mode)
+    else:
+        config.log_file = open(os.path.join(log_path, f"{config.name}_{filename}"), mode)
 
 
 def close_log_file():
