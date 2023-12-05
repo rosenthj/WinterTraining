@@ -34,7 +34,7 @@ def main():
     model = NetRel(d=8, num_inputs=773, activation=nn.Hardtanh(min_val=0, max_val=8))
 
     model.to(config.device)
-    scheduled_lr_train(model, args.name, data_loader, val_loader=val_loader, init_lr=args.init_lr, min_lr=args.min_lr,
+    scheduled_lr_train(model, data_loader, val_loader=val_loader, init_lr=args.init_lr, min_lr=args.min_lr,
                        epochs_per_step=args.epochs_per_step, log_freq=args.log_freq)
     return 0
 

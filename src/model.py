@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 
 def tensor_to_bytes(x):
-    return x.detach().flatten().numpy().tobytes()
+    return x.detach().to('cpu').flatten().numpy().tobytes()
 
 
 class Net(nn.Module):
