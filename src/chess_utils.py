@@ -1,8 +1,8 @@
 import chess
 import numpy as np
 import torch
+import scipy
 
-from src.data import get_features
 from utils import string_to_result_class, flip_result
 
 
@@ -57,6 +57,23 @@ def get_standardised_board_and_result(fen, result_str, cond_h_flip=False, cond_v
         assert hmc == board.halfmove_clock
         result = tb_probe_result(board)
     return board, result
+
+
+def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False):
+    board, result = get_standardised_board_and_result(fen, result_str, cond_h_flip, cond_v_flip)
+    result = torch.tensor([result])
+    features_board = np.zeros(2*6*64)
+    features_castling = np.array([board.has_queenside_castling_rights(chess.WHITE), board.has_kingside_castling_rights(chess.WHITE),
+                                     board.has_queenside_castling_rights(chess.BLACK), board.has_kingside_castling_rights(chess.BLACK)]).astype(np.int8)
+    for square in board.piece_map():
+        piece = board.piece_map()[square]
+        idx = (piece.piece_type-1) * 64 + square
+        if piece.color == chess.BLACK:
+            idx += 6 * 64
+        features_board[idx] = 1
+    features = np.concatenate((features_board, features_castling)).astype(np.int8)
+    assert features.shape[-1] == 772
+    return scipy.sparse.csr_matrix(features), result
 
 
 def get_startpos_tensor():

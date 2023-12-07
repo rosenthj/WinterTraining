@@ -4,9 +4,7 @@ import scipy
 import torch
 
 from game import ItGame
-from src import loader
-from src.loader import CSRDataset
-from chess_utils import get_standardised_board_and_result
+from loader import CSRDataset, merge_desk
 
 
 def load_next_game(pgn, print_headers=False):
@@ -65,23 +63,6 @@ def load_all_games(pgn_filename, f=None):
     pgn.close()
     print("Finished loading {} games".format(len(lst)))
     return lst
-
-
-def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False):
-    board, result = get_standardised_board_and_result(fen, result_str, cond_h_flip, cond_v_flip)
-    result = torch.tensor([result])
-    features_board = np.zeros(2*6*64)
-    features_castling = np.array([board.has_queenside_castling_rights(chess.WHITE), board.has_kingside_castling_rights(chess.WHITE),
-                                     board.has_queenside_castling_rights(chess.BLACK), board.has_kingside_castling_rights(chess.BLACK)]).astype(np.int8)
-    for square in board.piece_map():
-        piece = board.piece_map()[square]
-        idx = (piece.piece_type-1) * 64 + square
-        if piece.color == chess.BLACK:
-            idx += 6 * 64
-        features_board[idx] = 1
-    features = np.concatenate((features_board, features_castling)).astype(np.int8)
-    assert features.shape[-1] == 772
-    return scipy.sparse.csr_matrix(features), result
 
 
 def data_from_fen_res_set(fen_res_tuple):
@@ -147,4 +128,4 @@ def load_desk(num, generate, save_dir="./"):
 
 def load_and_merge_desk(num, generate, old_tag, new_tag):
     fd, rd = load_desk(num, generate)
-    return loader.merge_desk(fd, rd, old_tag, new_tag)
+    return merge_desk(fd, rd, old_tag, new_tag)
