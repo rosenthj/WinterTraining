@@ -7,7 +7,7 @@ from loader import load_dataset_ocb, CSRDataset, load_from_multiple
 from model import NetRel
 from train import scheduled_lr_train
 import config
-from chess_utils import get_startpos_eval
+# from chess_utils import get_startpos_eval, get_pos_eval, get_pos_semi_eval
 
 def main():
     # Command line argument parsing
@@ -28,7 +28,16 @@ def main():
     if args.load:
         model.load_state_dict(torch.load(os.path.join("../models/", args.load), map_location=torch.device('cpu')))
         print("Successfully loaded!")
-        print(get_startpos_eval(model))
+        # print(model.out.bias)
+        # print(model.c1.weight.shape)
+        # print(model.b1.shape)
+        # print(model.out.weight.shape)
+        # print(model.out.bias.shape)
+        # print(get_startpos_eval(model))
+        # print(get_pos_eval(model, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"))
+        # print(get_pos_eval(model, "4k3/8/8/8/8/8/8/4K3 w - - 0 1"))
+        # print(get_pos_semi_eval(model, "4k3/8/8/8/8/8/8/4K3 w - - 0 1"))
+        # model.serialize("temp_model", verbose=3)
         return 0
 
     f, r = load_from_multiple([2, 5, 6, 7, 8, 9, 10, 11, 12], save_dir="../datasets/")

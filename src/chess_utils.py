@@ -90,3 +90,27 @@ def get_startpos_eval(model):
         pred = model(get_startpos_tensor())[0]
     model.train(training)
     return pred, 0.5 + (pred[0] - pred[2]) / 2
+
+
+def get_pos_eval(model, fen):
+    training = model.training
+    model.eval()
+    with torch.no_grad():
+        feat, res = get_features(fen, "1-0", cond_h_flip=False)
+        dense = np.squeeze(np.asarray(feat.todense()))
+        t = torch.Tensor(dense).view(1, 772)
+        pred = model(t)[0]
+    model.train(training)
+    return pred, 0.5 + (pred[0] - pred[2]) / 2
+
+
+#def get_pos_semi_eval(model, fen):
+#    training = model.training
+#    model.eval()
+#    with torch.no_grad():
+#        feat, res = get_features(fen, "1-0", cond_h_flip=False)
+#        dense = np.squeeze(np.asarray(feat.todense()))
+#        t = torch.Tensor(dense).view(1, 772)
+#        pred = model.f(t)[0][:, [0,7], 4].view(12, 16, 2)[[5,11]]
+#    model.train(training)
+#    return pred

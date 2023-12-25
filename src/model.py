@@ -76,6 +76,13 @@ class NetRel(nn.Module):
             return x
         return F.softmax(x, dim=-1)
 
+    def f(self, x_in):
+        x = x_in[:, :768].view(-1, 12, 8, 8)
+        mask = torch.repeat_interleave(x, self.d, dim=1)
+        x = self.c1(x) + self.b1
+        # x = self.b1
+        return x * mask
+
     def _s(self, buffer, l, name, bias=True, verbose=0):
         if l is None:
             return
@@ -88,12 +95,12 @@ class NetRel(nn.Module):
             buffer.extend(tensor_to_bytes(l.bias))
 
     def serialize(self, filename, verbose=0):
-        print(f"Skipping serialize call. Not yet implemented!")
-        return
+        # print(f"Skipping serialize call. Not yet implemented!")
+        # return
         buffer = bytearray()
-        self._s(buffer, self.l1, "l1", verbose=verbose)
-        self._s(buffer, self.hl, "hl", bias=False, verbose=verbose)
-        self._s(buffer, self.l2, "l2", verbose=verbose)
+        self._s(buffer, self.c1, "conv layer", bias=False, verbose=verbose)
+        # self._s(buffer, self.b1, "bias layer", bias=False, verbose=verbose)
+        buffer.extend(tensor_to_bytes(self.b1.data))
         self._s(buffer, self.out, "out", verbose=verbose)
         with open(filename, "wb") as f:
             f.write(buffer)
