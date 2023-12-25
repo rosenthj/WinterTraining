@@ -9,6 +9,7 @@ from train import scheduled_lr_train
 import config
 # from chess_utils import get_startpos_eval, get_pos_eval, get_pos_semi_eval
 
+
 def main():
     # Command line argument parsing
     parser = argparse.ArgumentParser(description="Training Script for Teacher Models")
