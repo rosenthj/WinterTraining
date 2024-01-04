@@ -178,7 +178,8 @@ class NetRelH(nn.Module):
         self.c1 = nn.Conv2d(12, 12 * d, 15, padding=7, bias=False)
         self.b1 = nn.parameter.Parameter(data=torch.zeros((12 * d, 8, 8)))
         self.out = nn.Conv2d(12 * d, 3, 8, padding=0)
-        self.f1 = nn.Linear(768, fd)
+        self.f_dim = num_inputs
+        self.f1 = nn.Linear(self.f_dim, fd)
         self.fout = nn.Linear(fd, 3, bias=False)
 
     def forward(self, x_in, activate=True):
@@ -190,7 +191,7 @@ class NetRelH(nn.Module):
         x = self.out(x)
         x = torch.squeeze(x, 3)
         x = torch.squeeze(x, 2)
-        fx = x_in[:, :768]
+        fx = x_in[:, :self.f_dim]
         fx = self.activation(self.f1(fx))
         x = x + self.fout(fx)
         if not activate:
