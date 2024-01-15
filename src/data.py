@@ -1,8 +1,10 @@
 import chess
+import chess.pgn
 import numpy as np
 import scipy
 import torch
 
+from chess_utils import get_features
 from game import ItGame
 from loader import CSRDataset, merge_desk
 
@@ -46,6 +48,7 @@ def extract_fens_from_game(g):
 
 def load_all_games(pgn_filename, f=None):
     """Extract games from pgn and optionally perform argument function on each game individually."""
+    print(f"Loading gams from {pgn_filename}")
     lst = []
     pgn = open(pgn_filename, "r")
     # g = load_next_game(pgn)
@@ -97,17 +100,19 @@ def extract_data_from_game(g):
     return data_from_fen_res_set(fen_res_tuple)
 
 
-def gen_dataset_from_pgn(path="./../Data/CCRL-404FRCv2.pgn"):
+def gen_dataset_from_pgn(path="./../pgns/CCRL-404FRCv2.pgn"):
+    print(f"generating dataset from {path}")
     f, r = zip(*(load_all_games(path, extract_data_from_game)))
     return scipy.sparse.vstack(f), np.concatenate(r)
 
 
 def gen_dataset_helper(name, batch_size=16, shuffle=True, save=False):
-    features, results = gen_dataset_from_pgn(f"./../Data/{name}.pgn")
+    print(f"generating dataset from {name}")
+    features, results = gen_dataset_from_pgn(f"./../pgns/{name}.pgn")
     if save:
-        scipy.sparse.save_npz(f"{name}_features.npz", features)
-        np.savez(f"{name}_targets.npz", results)
-    return torch.utils.data.DataLoader(CSRDataset(features,results), batch_size=batch_size, shuffle=shuffle)
+        scipy.sparse.save_npz(f"./../{name}_features.npz", features)
+        np.savez(f"./../{name}_targets.npz", results)
+    return torch.utils.data.DataLoader(CSRDataset(features, results), batch_size=batch_size, shuffle=shuffle)
 
 
 def gen_subset_dataset(features, results, n, m=1):
@@ -115,9 +120,9 @@ def gen_subset_dataset(features, results, n, m=1):
     return features[idx], results[idx]
 
 
-def load_desk(num, generate, save_dir="./"):
+def load_desk(num, generate, save_dir="./datasets/"):
     if generate:
-        fd, rd = gen_dataset_from_pgn(f"./../Data/dfrc-self-play-v{num}.pgn")
+        fd, rd = gen_dataset_from_pgn(f"./../pgns/dfrc-self-play-v{num}.pgn")
         scipy.sparse.save_npz(f"{save_dir}features_desk_v{num}.npz", fd)
         np.savez(f"{save_dir}targets_desk_v{num}.npz", rd)
     else:

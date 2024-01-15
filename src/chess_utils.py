@@ -1,4 +1,5 @@
 import chess
+import chess.syzygy
 import numpy as np
 import torch
 import scipy
@@ -30,7 +31,7 @@ def get_boards_and_targets(loader, max_count=100):
 def tb_probe_result(board):
     assert isinstance(board, chess.Board)
     assert board.turn == chess.WHITE
-    with chess.syzygy.open_tablebase("syzygy") as tablebase:
+    with chess.syzygy.open_tablebase("./../syzygy") as tablebase:
         tb_res = tablebase.probe_wdl(board)
         if tb_res == 2:
             return 0

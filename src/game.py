@@ -21,6 +21,7 @@ class ItGame:
 
     def make_move(self):
         if self._umake:
+            assert self._umake[-1] in self._board.legal_moves
             # print("making move")
             self._board.push(self._umake.pop())
 
