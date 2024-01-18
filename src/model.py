@@ -318,7 +318,7 @@ class NetRelR(nn.Module):
         fx = self.fout(fx)
         rx = x_in[:, :768]
         rx = self.activation(self.r1(rx))
-        rx = F.softmax(self.fout(rx))
+        rx = F.softmax(self.rout(rx), dim=-1)
         x = rx[:, 0] * x + rx[:, 1] * fx
         if not activate:
             return x
