@@ -429,3 +429,42 @@ class NetRelHC(nn.Module):
         self._s(buffer, self.fout, "f out", bias=False, verbose=verbose)
         with open(filename, "wb") as f:
             f.write(buffer)
+
+
+class ConvNet(nn.Module):
+    def __init__(self, d=8, activation=F.relu):
+        super().__init__()
+        self.d = d
+        self.activation = activation
+
+        self.conv = nn.Conv2d(12, d, 15, padding=7, bias=False)
+        self.bias = nn.parameter.Parameter(data=torch.zeros((d, 8, 8)))
+        self.out = nn.Conv2d(d, 3, 8, padding=0)
+
+    def forward(self, x_in, activate=True):
+        x = x_in[:, :768].view(-1, 12, 8, 8)
+        x = self.conv(x) + self.bias
+        x = self.activation(x)
+        x = self.out(x)
+
+        x = torch.squeeze(x, 3)
+        x = torch.squeeze(x, 2)
+
+        if not activate:
+            return x
+        return F.softmax(x, dim=-1)
+
+    def _s(self, buffer, l, name, bias=True, verbose=0):
+        if l is None:
+            return
+        if verbose >= 1:
+            print(f"Buffering {name}")
+        buffer.extend(tensor_to_bytes(l.weight))
+        if bias:
+            if verbose >= 2:
+                print(f"{name} has bias")
+            buffer.extend(tensor_to_bytes(l.bias))
+
+    def serialize(self, filename, verbose=0):
+        print(f"Skipping serialize call. Not yet implemented!")
+        return
