@@ -383,17 +383,18 @@ class NetRelHC(nn.Module):
         x = x * mask
         x = self.activation(x)
         x = self.out(x)
+
+        cx = x_in[:, :768].view(-1, 12, 8, 8)
+        cx = self.c2(cx) + self.b2
+        cx = self.activation(cx)
+        x = x + self.cout(cx)
+
         x = torch.squeeze(x, 3)
         x = torch.squeeze(x, 2)
 
         fx = x_in[:, :self.f_dim]
         fx = self.activation(self.f1(fx))
         x = x + self.fout(fx)
-
-        cx = x_in[:, :768].view(-1, 12, 8, 8)
-        cx = self.c2(cx) + self.b2
-        cx = self.activation(cx)
-        x = x + self.cout(cx)
 
         if not activate:
             return x
