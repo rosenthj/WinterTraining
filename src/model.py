@@ -432,14 +432,14 @@ class NetRelHC(nn.Module):
 
 
 class ConvNet(nn.Module):
-    def __init__(self, d=8, activation=F.relu):
+    def __init__(self, d=8, kernel_size=15, padding=7, activation=F.relu):
         super().__init__()
         self.d = d
         self.activation = activation
 
-        self.conv = nn.Conv2d(12, d, 15, padding=7, bias=False)
+        self.conv = nn.Conv2d(12, d, kernel_size=kernel_size, padding=padding, bias=False)
         self.bias = nn.parameter.Parameter(data=torch.zeros((d, 8, 8)))
-        self.out = nn.Conv2d(d, 3, 8, padding=0)
+        self.out = nn.Conv2d(d, 3, 8 - (kernel_size - 1) + (2 * padding), padding=0)
 
     def forward(self, x_in, activate=True):
         x = x_in[:, :768].view(-1, 12, 8, 8)
