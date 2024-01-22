@@ -436,10 +436,10 @@ class ConvNet(nn.Module):
         super().__init__()
         self.d = d
         self.activation = activation
-
+        hidden_width = 8 - (kernel_size - 1) + (2 * padding)
         self.conv = nn.Conv2d(12, d, kernel_size=kernel_size, padding=padding, bias=False)
-        self.bias = nn.parameter.Parameter(data=torch.zeros((d, 8, 8)))
-        self.out = nn.Conv2d(d, 3, 8 - (kernel_size - 1) + (2 * padding), padding=0)
+        self.bias = nn.parameter.Parameter(data=torch.zeros((d, hidden_width, hidden_width)))
+        self.out = nn.Conv2d(d, 3, hidden_width, padding=0)
 
     def forward(self, x_in, activate=True):
         x = x_in[:, :768].view(-1, 12, 8, 8)
