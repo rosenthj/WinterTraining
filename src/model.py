@@ -498,7 +498,7 @@ class NetRelHD(nn.Module):
         xm = self.c1(xm) + self.b1
         xm = xm * mask_mirrored
 
-        x = self.activation(torch.stack([x, xm], dim=1))
+        x = self.activation(torch.cat([x, xm], dim=1))
         x = self.out(x)
         x = torch.squeeze(x, 3)
         x = torch.squeeze(x, 2)
@@ -509,7 +509,7 @@ class NetRelHD(nn.Module):
         fxm = xm.view(-1, 12*8*8)
         fxm = self.activation(self.f1(fxm))
 
-        x = x + self.fout(torch.stack([fx, fxm], dim=1))
+        x = x + self.fout(torch.cat([fx, fxm], dim=1))
         if not activate:
             return x
         return F.softmax(x, dim=-1)
