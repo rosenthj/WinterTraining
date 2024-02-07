@@ -506,7 +506,7 @@ class NetRelHD(nn.Module):
         fx = x_in[:, :self.f_dim]
         fx = self.activation(self.f1(fx))
 
-        fxm = xm.view(-1, 12*8*8)
+        fxm = x_mirror.view(-1, 12*8*8)
         fxm = self.activation(self.f1(fxm))
 
         x = x + self.fout(torch.cat([fx, fxm], dim=1))
