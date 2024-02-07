@@ -3,6 +3,7 @@ import chess.syzygy
 import numpy as np
 import torch
 import scipy
+import count
 
 from utils import string_to_result_class, flip_result
 
@@ -31,7 +32,9 @@ def get_boards_and_targets(loader, max_count=100):
 def tb_probe_result(board):
     assert isinstance(board, chess.Board)
     assert board.turn == chess.WHITE
-    with chess.syzygy.open_tablebase("./../syzygy") as tablebase:
+    count.total_tb_queries[len(board.piece_map())] += 1
+    # with chess.syzygy.open_tablebase("./../syzygy") as tablebase:
+    with chess.syzygy.open_tablebase("../../../Chess/TB_Merged") as tablebase:
         tb_res = tablebase.probe_wdl(board)
         if tb_res == 2:
             return 0
@@ -54,9 +57,12 @@ def get_standardised_board_and_result(fen, result_str, cond_h_flip=False, cond_v
         board = board.transform(chess.flip_horizontal)
     if board.pawns == 0 and cond_v_flip:
         board = board.transform(chess.flip_vertical)
-    if len(board.piece_map()) <= 5:
+    if len(board.piece_map()) <= 6:
         assert hmc == board.halfmove_clock
+        old_result = result
         result = tb_probe_result(board)
+        if result != old_result:
+            count.tb_changed[len(board.piece_map())] += 1
     return board, result
 
 

@@ -1,6 +1,7 @@
 import argparse
 
 from data import gen_dataset_helper
+import count
 
 
 def main():
@@ -10,6 +11,8 @@ def main():
     args = parser.parse_args()
 
     gen_dataset_helper(args.name, save=True)
+    print(f"TB Queries: {count.total_tb_queries}")
+    print(f"Results changed by TB Query: {count.tb_changed}")
 
     return 0
 
