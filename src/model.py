@@ -526,8 +526,8 @@ class NetRelHD(nn.Module):
             buffer.extend(tensor_to_bytes(l.bias))
 
     def serialize(self, filename, verbose=0):
-        print(f"Skipping serialize call. Not yet implemented!")
-        return
+        # print(f"Skipping serialize call. Not yet implemented!")
+        # return
         buffer = bytearray()
         self._s(buffer, self.c1, "conv layer", bias=False, verbose=verbose)
         buffer.extend(tensor_to_bytes(self.b1.data))
