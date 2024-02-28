@@ -4,7 +4,8 @@ import numpy as np
 import scipy
 import torch
 
-from chess_utils import get_features
+from utils import entropy
+from chess_utils import get_features, get_pos_eval
 from game import ItGame
 from loader import CSRDataset, merge_desk
 
@@ -17,8 +18,49 @@ def load_next_game(pgn, print_headers=False):
     return ItGame(g)
 
 
+def get_max_quiet_entropy(model, game):
+    game = ItGame(game)
+    game.to_start()
+    max_entropy = 0
+    max_entropy_pos = None
+    while not game.is_final_position():
+        game.make_move()
+        if game.is_quiet():
+            fen = game.fen()
+            eval = get_pos_eval(model, fen)[0]
+            pos_entropy = entropy(eval)
+            if pos_entropy > max_entropy:
+                max_entropy = pos_entropy
+                max_entropy_pos = fen
+    return max_entropy, max_entropy_pos
+
+
+def get_max_quiet_entropy_pgn(model, pgn_filename):
+    # print(f"Loading {pgn}")
+    pgn = open(pgn_filename, "r")
+    count = 1000
+    min_ent = 10
+    max_ent = 0
+    while count > 0:
+        game = chess.pgn.read_game(pgn)
+        entropy, fen = get_max_quiet_entropy(model, game)
+        if entropy > max_ent:
+            max_ent = entropy
+            print(fen)
+            print(entropy)
+            print(get_pos_eval(model, fen)[0])
+        if entropy < min_ent:
+            min_ent = entropy
+            print(fen)
+            print(entropy)
+            print(get_pos_eval(model, fen)[0])
+        count -= 1
+    # print(f"Loaded {pgn}")
+    return entropy, fen
+
+
 def extract_fens_from_game(g):
-    """Extract fens from a game for training. Returns tupple of fens and final result."""
+    """Extract fens from a game for training. Returns tuple of fens and final result."""
     game = ItGame(g)
     game.to_start()
     lst = []

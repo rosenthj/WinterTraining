@@ -37,3 +37,10 @@ def log(msg: str) -> None:
     config.log_file.write(msg + "\n")
     config.log_file.flush()
 
+
+def entropy(outcome):
+    assert outcome.min() >= 0 and outcome.max() <= 1.0,\
+        f"Outcome is not a probability! Values are between ({outcome.min}, {outcome.max})"
+    return -(outcome * outcome.log()).sum()
+
+
