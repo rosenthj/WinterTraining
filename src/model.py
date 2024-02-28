@@ -536,3 +536,46 @@ class NetRelHD(nn.Module):
         self._s(buffer, self.fout, "f out", bias=False, verbose=verbose)
         with open(filename, "wb") as f:
             f.write(buffer)
+
+
+class CRNet(nn.Module):
+    def __init__(self, d=8, rec=3, kernel_size=15, padding=7, activation=F.relu):
+        super().__init__()
+        self.d = d
+        self.rec = rec
+        self.activation = activation
+        hidden_width = 8 - (kernel_size - 1) + (2 * padding)
+        self.conv = nn.Conv2d(12, d, kernel_size=kernel_size, padding=padding, bias=False)
+        self.hidden_conv = nn.Conv2d(d, d, kernel_size=3, padding=1)
+        self.out = nn.Conv2d(d // 2, 3, hidden_width, padding=0)
+
+    def forward(self, x_in, activate=True, rec=None):
+        if rec is None:
+            rec=self.rec
+        x = x_in[:, :768].view(-1, 12, 8, 8)
+        x = self.activation(self.conv(x))
+        for i in range(rec):
+            x = self.activation(self.hidden_conv)
+        x = self.out(x[:, ::2])
+
+        x = torch.squeeze(x, 3)
+        x = torch.squeeze(x, 2)
+
+        if not activate:
+            return x
+        return F.softmax(x, dim=-1)
+
+    def _s(self, buffer, l, name, bias=True, verbose=0):
+        if l is None:
+            return
+        if verbose >= 1:
+            print(f"Buffering {name}")
+        buffer.extend(tensor_to_bytes(l.weight))
+        if bias:
+            if verbose >= 2:
+                print(f"{name} has bias")
+            buffer.extend(tensor_to_bytes(l.bias))
+
+    def serialize(self, filename, verbose=0):
+        print(f"Skipping serialize call. Not yet implemented!")
+        return
