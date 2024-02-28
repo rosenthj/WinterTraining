@@ -555,7 +555,7 @@ class CRNet(nn.Module):
         x = x_in[:, :768].view(-1, 12, 8, 8)
         x = self.activation(self.conv(x))
         for i in range(rec):
-            x = self.activation(self.hidden_conv)
+            x = self.activation(self.hidden_conv(x))
         x = self.out(x[:, ::2])
 
         x = torch.squeeze(x, 3)
