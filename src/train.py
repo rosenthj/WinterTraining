@@ -34,7 +34,7 @@ def randomize_piece_positions(x, randomization):
     return x
 
 
-def test(model, test_loader, base_loss=F.mse_loss):
+def test(model, test_loader, base_loss=F.mse_loss, rec=None):
     if not isinstance(base_loss, list):
         base_loss = [base_loss]
     training = model.training
@@ -44,7 +44,10 @@ def test(model, test_loader, base_loss=F.mse_loss):
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(config.device), target.to(config.device)
-            output = model(data.type(torch.float32).to(config.device))
+            if rec is None:
+                output = model(data.type(torch.float32).to(config.device))
+            else:
+                output = model(data.type(torch.float32).to(config.device), rec=rec)
             for i in range(len(base_loss)):
                 loss = loss_f(output, target, base_loss=base_loss[i])
                 loss_sum[i] += loss.item()
@@ -78,8 +81,8 @@ def gen_mirror_dataset(data_loader, count):
     return torch.stack(positions), torch.stack(mirrored)
 
 
-def gen_validation_string(model, validation_loader):
-    test_loss = test(model, validation_loader, base_loss=[F.mse_loss, F.l1_loss])
+def gen_validation_string(model, validation_loader, rec=None):
+    test_loss = test(model, validation_loader, base_loss=[F.mse_loss, F.l1_loss], rec=rec)
     # start_pred, start_eval = get_startpos_eval(model)
     # wdl_str = f"({start_pred[0]:.4f}/{start_pred[1]:.4f}/{start_pred[2]:.4f})"
     # return f"Val mse:{test_loss[0]:.6f}, Val l1:{test_loss[1]:.6f}, Start WDL:{wdl_str}=>{start_eval:.5f}"
@@ -101,7 +104,10 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         # output = model(data.type(torch.float32), activate=True)
         # loss = F.binary_cross_entropy(output, F.one_hot(target, num_classes=3).type(torch.float32))#, weight=custom_ce_loss_weights)
 
-        output = model(data.type(torch.float32), activate=False)
+        if config.rec is None:
+            output = model(data.type(torch.float32), activate=False)
+        else:
+            output = model(data.type(torch.float32), activate=False, rec=torch.randint(config.rec, (1,)).item())
         # loss = F.cross_entropy(output, target)
         loss = loss_combined(output, target, base_loss=base_loss)
 
@@ -117,6 +123,8 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         if count % log_freq == 0:
             batch_res_str = f"Batch {count} Recent:{(recent_loss / log_freq):.6f}, Total:{(loss_sum / count):.6f}"
             if test_loader is not None:
+                if config.rec is not None and config.rec > 1:
+                    batch_res_str += ", " + gen_validation_string(model, test_loader, rec=1)
                 batch_res_str += ", " + gen_validation_string(model, test_loader)
             log(batch_res_str)
             if name is not None:
