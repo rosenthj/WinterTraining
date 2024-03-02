@@ -628,3 +628,48 @@ class CRNetv2(nn.Module):
     def serialize(self, filename, verbose=0):
         print(f"Skipping serialize call. Not yet implemented!")
         return
+
+
+class CRNetv3(nn.Module):
+    def __init__(self, d=8, rec=3, activation=F.relu):
+        super().__init__()
+        self.d = d
+        self.rec = rec
+        self.activation = activation
+        self.emb = nn.Conv2d(12, d, 1)
+        self.hc1 = nn.Conv2d(d, d, kernel_size=3, padding=1)
+        self.hc2 = nn.Conv2d(d, d, kernel_size=3, padding=1)
+        self.hc3 = nn.Conv2d(d, d, kernel_size=3, padding=1)
+        self.hc4 = nn.Conv2d(d, d, kernel_size=3, padding=1)
+        self.hc5 = nn.Conv2d(d, d, kernel_size=3, padding=1)
+        self.hc6 = nn.Conv2d(d, d, kernel_size=3, padding=1)
+        self.hc7 = nn.Conv2d(d, d, kernel_size=3, padding=1)
+        self.ho = nn.Conv2d(d, d // 2, kernel_size=1)
+        self.out = nn.Conv2d(d // 2, 3, 8)
+
+    def forward(self, x_in, activate=True, rec=None):
+        if rec is None:
+            rec=self.rec
+        x = x_in[:, :768].view(-1, 12, 8, 8)
+        x = self.activation(self.emb(x))
+        for i in range(rec):
+            x = self.activation(self.hc1(x))
+            x = self.activation(self.hc2(x))
+            x = self.activation(self.hc3(x))
+            x = self.activation(self.hc4(x))
+            x = self.activation(self.hc5(x))
+            x = self.activation(self.hc6(x))
+            x = self.activation(self.hc7(x))
+        x = self.activation(self.ho(x))
+        x = self.out(x)
+
+        x = torch.squeeze(x, 3)
+        x = torch.squeeze(x, 2)
+
+        if not activate:
+            return x
+        return F.softmax(x, dim=-1)
+
+    def serialize(self, filename, verbose=0):
+        print(f"Skipping serialize call. Not yet implemented!")
+        return
