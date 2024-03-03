@@ -11,3 +11,11 @@ class SqCReLU(nn.Module):
     def forward(self, x):
         x = torch.clip(x, self.clip_min, self.clip_max)
         return x * x
+
+
+class MishSqrt(nn.Module):
+    def __init__(self):
+        super(MishSqrt, self).__init__()
+
+    def forward(self, x):
+        return torch.sqrt(nn.funtional.mish(x)+0.30885) - 0.30885
