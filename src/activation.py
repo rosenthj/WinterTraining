@@ -18,4 +18,4 @@ class MishSqrt(nn.Module):
         super(MishSqrt, self).__init__()
 
     def forward(self, x):
-        return torch.sqrt(nn.funtional.mish(x)+0.30885) - 0.30885
+        return torch.sqrt(nn.functional.mish(x)+0.30885) - 0.30885
