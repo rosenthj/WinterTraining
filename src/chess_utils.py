@@ -46,7 +46,7 @@ def tb_probe_result(board):
 
 
 def get_standardised_board_and_result(fen, result_str, cond_h_flip=False, cond_v_flip=False):
-    board = chess.Board()
+    board = chess.Board(chess960=True)
     board.set_fen(fen)
     hmc = board.halfmove_clock
     result = string_to_result_class(result_str)
