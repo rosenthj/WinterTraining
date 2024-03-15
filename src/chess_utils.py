@@ -57,7 +57,8 @@ def get_standardised_board_and_result(fen, result_str, cond_h_flip=False, cond_v
         board = board.transform(chess.flip_horizontal)
     if board.pawns == 0 and cond_v_flip:
         board = board.transform(chess.flip_vertical)
-    if len(board.piece_map()) <= 6:
+    if (len(board.piece_map()) <= 6 and not board.has_castling_rights(chess.WHITE)
+            and not board.has_castling_rights(chess.BLACK)):
         assert hmc == board.halfmove_clock
         old_result = result
         result = tb_probe_result(board)
