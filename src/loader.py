@@ -1,11 +1,13 @@
+import os
+
 import numpy as np
 import scipy
 import torch
 
 
-def load_features_results(name):
-    features = scipy.sparse.load_npz(f"{name}_features.npz")
-    results = np.load(f"{name}_targets.npz")['arr_0']
+def load_features_results(name, data_dir="../datasets/"):
+    features = scipy.sparse.load_npz(os.path.join(data_dir, f"features_{name}.npz"))
+    results = np.load(os.path.join(data_dir, f"targets_{name}.npz"))['arr_0']
     return features, results
 
 
