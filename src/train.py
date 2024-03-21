@@ -97,9 +97,10 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
     count = 0
     custom_ce_loss_weights = torch.Tensor([1.0, 0.2, 1.0])
     for (data, target) in train_loader:
-        data = randomize_piece_positions(data, rng_piece_positions)
+        # data = randomize_piece_positions(data, rng_piece_positions)
         data, target = data.to(config.device), target.to(config.device)
         optimizer.zero_grad()
+        config.activation_hook.clear()
 
         # output = model(data.type(torch.float32), activate=True)
         # loss = F.binary_cross_entropy(output, F.one_hot(target, num_classes=3).type(torch.float32))#, weight=custom_ce_loss_weights)
@@ -110,6 +111,11 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             output = model(data.type(torch.float32), activate=False, rec=torch.randint(config.rec, (1,)).item())
         # loss = F.cross_entropy(output, target)
         loss = loss_combined(output, target, base_loss=base_loss)
+        l1_penalty = 0.
+        for output in config.activation_hook:
+            l1_penalty += torch.norm(output, 1)
+        l1_penalty *= 0.0001
+        loss += l1_penalty
 
         # output = model(data.type(torch.float32))
         # loss = loss_f(output, target, base_loss=base_loss)
@@ -120,6 +126,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         count += 1
         loss.backward()
         optimizer.step()
+        config.activation_hook.clear()
         if count % log_freq == 0:
             batch_res_str = f"Batch {count} Recent:{(recent_loss / log_freq):.6f}, Total:{(loss_sum / count):.6f}"
             if test_loader is not None:
@@ -176,9 +183,18 @@ def load_partial_model_weights(model, helper_model, n):
         model.out.bias[:n] = helper_model.out.bias
 
 
+class OutputHook(list):
+    """ Hook to capture module outputs.
+    """
+    def __call__(self, module, input, output):
+        self.append(output)
+
+
 def scheduled_lr_train(model, data_loader, val_loader=None, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
                        epochs_per_step=1, log_freq=100000):
     assert 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
+    config.activation_hook = OutputHook()
+    model.activation.register_forward_hook(config.activation_hook)
     step = 0
     lr = init_lr
     while lr >= min_lr:
