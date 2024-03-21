@@ -45,12 +45,14 @@ def tb_probe_result(board):
             return 1
 
 
-def get_standardised_board_and_result(fen, result_str, cond_h_flip=False, cond_v_flip=False):
+def get_standardised_board_and_result(fen, result, cond_h_flip=False, cond_v_flip=False,
+                                      get_white_perspective_result=False):
     board = chess.Board(chess960=True)
     board.set_fen(fen)
     hmc = board.halfmove_clock
-    result = string_to_result_class(result_str)
-    if board.turn == chess.BLACK:
+    result = string_to_result_class(result)
+    stm_is_black = (board.turn == chess.BLACK)
+    if stm_is_black:
         board = board.mirror()
         result = flip_result(result)
     if board.castling_rights == 0 and cond_h_flip:
@@ -64,11 +66,15 @@ def get_standardised_board_and_result(fen, result_str, cond_h_flip=False, cond_v
         result = tb_probe_result(board)
         if result != old_result:
             count.tb_changed[len(board.piece_map())] += 1
-    return board, result
+    if not get_white_perspective_result:
+        return board, result
+    if stm_is_black:
+        return board, result, flip_result(result)
+    return board, result, result
 
 
-def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False):
-    board, result = get_standardised_board_and_result(fen, result_str, cond_h_flip, cond_v_flip)
+def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False, get_w_persp_result=False):
+    board, result, wp_res = get_standardised_board_and_result(fen, result_str, cond_h_flip, cond_v_flip, True)
     result = torch.tensor([result])
     features_board = np.zeros(2*6*64)
     features_castling = np.array([board.has_queenside_castling_rights(chess.WHITE), board.has_kingside_castling_rights(chess.WHITE),
@@ -81,6 +87,8 @@ def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False):
         features_board[idx] = 1
     features = np.concatenate((features_board, features_castling)).astype(np.int8)
     assert features.shape[-1] == 772
+    if get_w_persp_result:
+        return scipy.sparse.csr_matrix(features), result, wp_res
     return scipy.sparse.csr_matrix(features), result
 
 

@@ -3,6 +3,8 @@ import config
 
 
 def string_to_result_class(result_str):
+    if not isinstance(result_str, str):
+        return result_str
     if result_str == '1-0':
         return 0
     elif result_str == '1/2-1/2':

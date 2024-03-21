@@ -3,8 +3,9 @@ import chess.pgn
 import numpy as np
 import scipy
 import torch
+import count
 
-from utils import entropy
+from utils import entropy, string_to_result_class
 from chess_utils import get_features, get_pos_eval
 from game import ItGame
 from loader import CSRDataset, merge_desk
@@ -104,17 +105,22 @@ def load_all_games(pgn_filename, f=None):
         # g = load_next_game(pgn)
         g = chess.pgn.read_game(pgn)
         if (len(lst) % 25000) == 0:
-            print("Loaded {} games".format(len(lst)))
+            print(f"Loaded {len(lst)} games. Changed results: {count.total_changed}")
     pgn.close()
-    print("Finished loading {} games".format(len(lst)))
+    print(f"Finished loading {len(lst)} games. Changed results: {count.total_changed}")
     return lst
 
 
-def data_from_fen_res_set(fen_res_tuple):
+def data_from_fen_res_set(fens, res):
     features = []
     results = []
-    for idx in range(len(fen_res_tuple[0])):
-        f, r = get_features(fen_res_tuple[0][idx], fen_res_tuple[1], np.random.randint(2), np.random.randint(2))
+    res = string_to_result_class(res)
+    og_res = res
+    for fen in reversed(fens):
+        f, r, res = get_features(fen, res, cond_h_flip=np.random.randint(2), cond_v_flip=np.random.randint(2),
+                                 get_w_persp_result=True)
+        if res != og_res:
+            count.total_changed += 1
         features.append(f)
         results.append(r)
     if len(features) == 0:
@@ -123,23 +129,21 @@ def data_from_fen_res_set(fen_res_tuple):
 
 
 # Likely broken now
-def data_from_game_set(game_set):
-    features = []
-    results = []
-    for fen_res_set in game_set:
-        f, r = data_from_fen_res_set(fen_res_set)
-        if f is None:
-            continue
-        features.append(f)
-        results.append(r)
-    return torch.cat(features), torch.cat(results)
+#def data_from_game_set(game_set):
+#    features = []
+#    results = []
+#    for fen_res_set in game_set:
+#        f, r = data_from_fen_res_set(fen_res_set)
+#        if f is None:
+#            continue
+#        features.append(f)
+#        results.append(r)
+#    return torch.cat(features), torch.cat(results)
 
 
 def extract_data_from_game(g):
-    fen_res_tuple = extract_fens_from_game(g)
-    if fen_res_tuple is None:
-        return None
-    return data_from_fen_res_set(fen_res_tuple)
+    fens, res = extract_fens_from_game(g)
+    return data_from_fen_res_set(fens, res)
 
 
 def gen_dataset_from_pgn(path="./../pgns/CCRL-404FRCv2.pgn"):
@@ -152,8 +156,8 @@ def gen_dataset_helper(name, batch_size=16, shuffle=True, save=False):
     print(f"generating dataset from {name}")
     features, results = gen_dataset_from_pgn(f"./../pgns/{name}.pgn")
     if save:
-        scipy.sparse.save_npz(f"./../{name}_features.npz", features)
-        np.savez(f"./../{name}_targets.npz", results)
+        scipy.sparse.save_npz(f"./../features_{name}.npz", features)
+        np.savez(f"./../targets_{name}.npz", results)
     return torch.utils.data.DataLoader(CSRDataset(features, results), batch_size=batch_size, shuffle=shuffle)
 
 
