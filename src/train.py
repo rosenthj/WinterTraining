@@ -151,8 +151,8 @@ def save(model, path=None, name=None, epoch=None):
     model.serialize(f"{path}.bin", verbose=1)
 
 
-def train(model, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000, rng_piece_positions=False,
-          loss=F.mse_loss, initial_epoch=0, test_loader=None):
+def train(model, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000, loss=F.mse_loss, initial_epoch=0,
+          test_loader=None):
     if optimizer is None:
         optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
     if not os.path.exists(f"../models/{config.name}"):
@@ -162,8 +162,8 @@ def train(model, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000,
             print()
         log(
             f"Epoch {epoch + 1}--Training on {len(train_loader.dataset)} samples----------------------------------------------------")
-        train_epoch(model, optimizer, train_loader, log_freq=log_freq, rng_piece_positions=rng_piece_positions,
-                    base_loss=loss, test_loader=test_loader, name=config.name)
+        train_epoch(model, optimizer, train_loader, log_freq=log_freq, base_loss=loss, test_loader=test_loader,
+                    name=config.name)
         save(model, f"../models/{config.name}/{config.name}_ep{epoch + 1}")
         # torch.save(model.state_dict(), f"../models/{name}/{name}_ep{epoch + 1}.pt")
         # model.serialize(f"../models/{name}/{name}_ep{epoch + 1}.bin", verbose=1)
