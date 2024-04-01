@@ -175,14 +175,6 @@ def load_weights(model, name, ep):
     model.load_state_dict(torch.load(f"../models/{name}/{name}_ep{ep}.pt"))
 
 
-def load_partial_model_weights(model, helper_model, n):
-    with torch.no_grad():
-        model.l1.weight[:n] = helper_model.l1.weight
-        model.l1.bias[:n] = helper_model.l1.bias
-        model.out.weight[:, :n] = helper_model.out.weight
-        model.out.bias[:n] = helper_model.out.bias
-
-
 class OutputHook(list):
     """ Hook to capture module outputs.
     """
@@ -190,7 +182,7 @@ class OutputHook(list):
         self.append(output)
 
 
-def scheduled_lr_train(model, data_loader, val_loader=None, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
+def scheduled_lr_train(model, data_loader, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
                        epochs_per_step=1, log_freq=100000):
     assert 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
     # config.activation_hook = OutputHook()
@@ -198,7 +190,7 @@ def scheduled_lr_train(model, data_loader, val_loader=None, init_lr=0.001, min_l
     step = 0
     lr = init_lr
     while lr >= min_lr:
-        train(model, data_loader, epochs_per_step, lr=lr, log_freq=log_freq,
+        train(model, data_loader, epochs_per_step, lr=lr, log_freq=log_freq, loss=loss,
               initial_epoch=(epochs_per_step * step), test_loader=val_loader)
         lr *= lr_mult
         step += 1
