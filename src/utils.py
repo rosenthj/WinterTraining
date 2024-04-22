@@ -1,5 +1,6 @@
 import os
 import config
+import torch
 
 
 def string_to_result_class(result_str):
@@ -46,3 +47,5 @@ def entropy(outcome):
     return -(outcome * outcome.log()).sum()
 
 
+def load_weights(model, name, ep, device="cpu"):
+    model.load_state_dict(torch.load(f"../models/{name}/{name}_ep{ep}.pt", map_location=device))

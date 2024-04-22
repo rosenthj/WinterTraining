@@ -171,10 +171,6 @@ def train(model, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000,
             log(f"Finished Epoch {epoch + 1}. {gen_validation_string(model, test_loader)}")
 
 
-def load_weights(model, name, ep):
-    model.load_state_dict(torch.load(f"../models/{name}/{name}_ep{ep}.pt"))
-
-
 class OutputHook(list):
     """ Hook to capture module outputs.
     """
