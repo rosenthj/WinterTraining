@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import scipy
 import count
+import config
 
 from utils import string_to_result_class, flip_result
 
@@ -43,6 +44,8 @@ def tb_probe_result(board):
     assert isinstance(board, chess.Board)
     assert board.turn == chess.WHITE
     count.total_tb_queries[len(board.piece_map())] += 1
+    if config.tablebase is not None:
+        return tb_res_to_wdl(config.tablebase.probe_wdl(board))
     # with chess.syzygy.open_tablebase("./../syzygy") as tablebase:
     with chess.syzygy.open_tablebase("../../../Chess/TB_Merged") as tablebase:
         return tb_res_to_wdl(tablebase.probe_wdl(board))
