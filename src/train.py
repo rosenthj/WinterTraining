@@ -4,6 +4,7 @@ import os
 import torch
 import torch.nn.functional as F
 
+from loader import load_from_multiple, CSRDataset
 from utils import log
 
 
@@ -190,4 +191,20 @@ def scheduled_lr_train(model, data_loader, val_loader=None, loss=F.mse_loss, ini
               initial_epoch=(epochs_per_step * step), test_loader=val_loader)
         lr *= lr_mult
         step += 1
+        log(f"\nLearning rate updated to {lr}")
+
+
+def train_v2(model, data_lst, portion, iters, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
+                       epochs_per_step=1, log_freq=100000, batch_size=16):
+    assert 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
+    step = 0
+    lr = init_lr
+    while lr >= min_lr:
+        for iter in range(iters):
+            f, r = load_from_multiple(data_lst, portion=portion, save_dir="../datasets/")
+            data_loader = torch.utils.data.DataLoader(CSRDataset(f, r), batch_size=batch_size, shuffle=True)
+            train(model, data_loader, epochs_per_step, lr=lr, log_freq=log_freq, loss=loss,
+                  initial_epoch=(epochs_per_step * step), test_loader=val_loader)
+            step += 1
+        lr *= lr_mult
         log(f"\nLearning rate updated to {lr}")
