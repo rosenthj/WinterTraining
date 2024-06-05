@@ -3,6 +3,7 @@ import os
 import numpy as np
 import scipy
 import torch
+import random
 
 
 def load_features_results(name, data_dir="../datasets/"):
@@ -54,17 +55,25 @@ def add_ocb(features):
 def load_dataset_ocb(name, batch_size=16, shuffle=True):
     features, results = load_features_results(name)
     features = add_ocb(features)
-    return torch.utils.data.DataLoader(CSRDataset(features,results), batch_size=batch_size, shuffle=shuffle)
+    return torch.utils.data.DataLoader(CSRDataset(features, results), batch_size=batch_size, shuffle=shuffle)
 
 
-def load_from_multiple(lst, save_dir="./"):
+def load_from_multiple(lst, portion=1.0, save_dir="./"):
     lst = [(f"{save_dir}features_desk_v{num}.npz", f"{save_dir}targets_desk_v{num}.npz") for num in lst]
     f, r = None, None
     for feature_filename, label_filename in lst:
+        f0 = scipy.sparse.load_npz(feature_filename)
+        r0 = np.load(label_filename)['arr_0']
+        if portion < 1.0:
+            idx = np.arange(len(r0))
+            random.shuffle(idx)
+            m_idx = int(portion * len(r0))
+            f0 = f0[idx < m_idx]
+            r0 = r0[idx < m_idx]
         if f is None:
-            f = add_ocb(scipy.sparse.load_npz(feature_filename))
-            r = np.load(label_filename)['arr_0']
+            f = f0
+            r = r0
         else:
-            f = scipy.sparse.vstack([f, add_ocb(scipy.sparse.load_npz(feature_filename))])
-            r = np.concatenate([r, np.load(label_filename)['arr_0']])
+            f = scipy.sparse.vstack([f, f0])
+            r = np.concatenate([r, r0])
     return f, r
