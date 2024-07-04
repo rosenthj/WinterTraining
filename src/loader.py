@@ -59,9 +59,17 @@ def load_dataset_ocb(name, batch_size=16, shuffle=True):
 
 
 def load_from_multiple(lst, portion=1.0, save_dir="./"):
-    lst = [(f"{save_dir}features_desk_v{num}.npz", f"{save_dir}targets_desk_v{num}.npz") for num in lst]
+    def unpack(el):
+        if isinstance(el, tuple):
+            num, por = el
+        else:
+            num, por = el, portion
+        return f"{save_dir}features_desk_v{num}.npz", f"{save_dir}targets_desk_v{num}.npz", por
+
+    lst = [unpack(element) for element in lst]
+    # lst = [(f"{save_dir}features_desk_v{num}.npz", f"{save_dir}targets_desk_v{num}.npz") for num in lst]
     f, r = None, None
-    for feature_filename, label_filename in lst:
+    for feature_filename, label_filename, portion in lst:
         f0 = scipy.sparse.load_npz(feature_filename)
         r0 = np.load(label_filename)['arr_0']
         if portion < 1.0:
