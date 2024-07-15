@@ -9,8 +9,7 @@ class SqCReLU(nn.Module):
         self.clip_max = clip_max
 
     def forward(self, x):
-        x = torch.clip(x, self.clip_min, self.clip_max)
-        return x * x
+        return torch.pow(torch.clip(x, self.clip_min, self.clip_max), 2.0)
 
 
 class MishSqrt(nn.Module):
