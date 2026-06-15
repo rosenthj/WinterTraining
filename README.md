@@ -101,9 +101,38 @@ Training (`train.py`) optimizes a combined WDL MSE + cross-entropy loss and peri
 both `{name}.pt` (PyTorch state dict) and `{name}.bin` (raw little-endian weight buffer consumed
 by Winter via `model.serialize`).
 
+## The model currently used by the Winter engine
+
+The Winter engine's `net_evaluation.cc` loads `rn16HD64b.bin` (via `INCBIN`). That network is
+produced by the **`NetRelHD`** class in `src/model.py`, instantiated as:
+
+```python
+NetRelHD(d=16, fd=64, num_inputs=768, activation=nn.Hardtanh(min_val=0, max_val=8))
+```
+
+Decoding the file name `rn16HD64b`: `rn` = relative net, `16` = `d=16`, **`HD`** = **H**idden
+full layer + mirror-**D**oubled, `64` = `fd=64`, `b` = revision.
+
+How this was determined:
+
+- `NetRelHD` is the only class combining both the **relative-conv path** (`c1`/`b1`/`out`,
+  matching the engine's `net_input_weights` / `bias_layer_one` / `output_weights`) and a
+  **full hidden-layer path** (`f1`/`fout`, matching `full_layer_weights` / `full_output_weights`).
+- It is also the only such class that is **mirror-doubled** (`out = Conv2d(2*12*d, …)`,
+  `fout = Linear(2*fd, …)`, position concatenated with its vertical mirror). The engine
+  confirms this: `init_weights()` calls only the `init_mirrored_*` loaders, which read
+  half-width weights from the file (`block_size/2`, `full_block_size/2`) and reconstruct the
+  mirrored half at load time.
+- The engine load order (`init_weights`) matches `NetRelHD.serialize` byte-for-byte:
+  `c1` → `b1` → `out` (+bias) → `f1` (+bias) → `fout` (no bias).
+- Engine sizes `block_size = 32 = 2·d` and `full_block_size = 128 = 2·fd` give `d=16`, `fd=64`.
+  The full layer reads only the `12×64 = 768` piece-square inputs (no castling features), so
+  `num_inputs = 768`. The clipped-ReLU at 8 (`clipped_relu(8)`) corresponds to `Hardtanh(0, 8)`.
+
 ## Other scripts
 
 - `gen_ending_data.py`, `max_entropy_extraction.py`, `move_order_writer.py`, `count.py` —
   auxiliary data-generation / analysis utilities.
-- `model.py` — network definitions (`Net`, `NetRel`).
+- `model.py` — network definitions. The relative-conv family (`NetRel`, `NetRelX`, `NetRelH`,
+  `NetRelHD`, …) is what Winter uses; see the section above for the currently deployed one.
 </content>
