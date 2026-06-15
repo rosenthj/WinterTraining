@@ -152,12 +152,13 @@ def gen_dataset_from_pgn(path="./../pgns/CCRL-404FRCv2.pgn"):
     return scipy.sparse.vstack(f), np.concatenate(r)
 
 
-def gen_dataset_helper(name, batch_size=16, shuffle=True, save=False):
+def gen_dataset_helper(name, batch_size=16, shuffle=True, save=False, pgn_dir="./../pgns/",
+                       out_dir="./../datasets/"):
     print(f"generating dataset from {name}")
-    features, results = gen_dataset_from_pgn(f"./../pgns/{name}.pgn")
+    features, results = gen_dataset_from_pgn(f"{pgn_dir}{name}.pgn")
     if save:
-        scipy.sparse.save_npz(f"./../features_{name}.npz", features)
-        np.savez(f"./../targets_{name}.npz", results)
+        scipy.sparse.save_npz(f"{out_dir}features_{name}.npz", features)
+        np.savez(f"{out_dir}targets_{name}.npz", results)
     return torch.utils.data.DataLoader(CSRDataset(features, results), batch_size=batch_size, shuffle=shuffle)
 
 
