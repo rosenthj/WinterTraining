@@ -4,7 +4,7 @@ import os
 import torch
 import torch.nn.functional as F
 
-from loader import load_from_multiple, CSRDataset
+from loader import load_from_multiple, make_scatter_loader
 from utils import log
 
 
@@ -202,7 +202,7 @@ def train_v2(model, data_lst, portion, iters, val_loader=None, loss=F.mse_loss, 
     while lr >= min_lr:
         for iter in range(iters):
             f, r = load_from_multiple(data_lst, portion=portion, save_dir="../datasets/")
-            data_loader = torch.utils.data.DataLoader(CSRDataset(f, r), batch_size=batch_size, shuffle=True)
+            data_loader = make_scatter_loader(f, r, batch_size=batch_size, shuffle=True, device=config.device)
             train(model, data_loader, epochs_per_step, lr=lr, log_freq=log_freq, loss=loss,
                   initial_epoch=(epochs_per_step * step), test_loader=val_loader)
             step += 1

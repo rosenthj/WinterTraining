@@ -1,3 +1,4 @@
 /datasets/*.npz
 /logs/*.txt
 /models/*.pt
+__pycache__/

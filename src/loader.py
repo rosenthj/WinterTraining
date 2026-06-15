@@ -5,6 +5,8 @@ import scipy
 import torch
 import random
 
+from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
+
 
 def load_features_results(name, data_dir="../datasets/"):
     features = scipy.sparse.load_npz(os.path.join(data_dir, f"features_{name}.npz"))
@@ -37,6 +39,74 @@ class CSRDataset:
 
     def __len__(self):
         return self.features.shape[0]
+
+
+def _identity_collate(batch):
+    """The dataset already returns a full batch; keep it as-is."""
+    return batch
+
+
+class BatchIndexCSRDataset:
+    """CSR-backed dataset that returns an entire batch at once.
+
+    ``__getitem__`` receives a *list* of row indices (produced by a ``BatchSampler``)
+    instead of a single index. It slices those rows out of the CSR matrix in one pass
+    and returns the batch as sparse COO components -- the local row index and feature
+    column of every nonzero -- plus the targets. Densification is deferred to
+    ``ScatterLoader``, which scatters these indices into a dense tensor on the training
+    device. Because the features are one-hot, the nonzero *values* are all 1 and never
+    need to be stored or transferred.
+    """
+
+    def __init__(self, features, targets):
+        self.features = features.tocsr()
+        self.targets = np.asarray(targets)
+        self.num_features = self.features.shape[1]
+
+    def __len__(self):
+        return self.features.shape[0]
+
+    def __getitem__(self, batch_indices):
+        coo = self.features[batch_indices].tocoo()
+        rows = torch.from_numpy(coo.row.astype(np.int64))
+        cols = torch.from_numpy(coo.col.astype(np.int64))
+        targets = torch.as_tensor(self.targets[batch_indices], dtype=torch.long)
+        return rows, cols, len(batch_indices), targets
+
+
+class ScatterLoader:
+    """Yields dense ``(data, target)`` batches built via on-device scatter.
+
+    Drop-in replacement for ``DataLoader(CSRDataset(...))`` in the training loops: it
+    exposes ``__iter__``, ``__len__`` and a ``.dataset`` attribute. Each batch is
+    densified directly on ``device`` by scattering the one-hot column indices into a
+    zeroed tensor, so only a handful of indices per position cross the CPU->GPU boundary
+    instead of a full 772-wide dense row.
+    """
+
+    def __init__(self, dataset, batch_size=16, shuffle=True, device=None, drop_last=False):
+        self.dataset = dataset
+        self.device = device if device is not None else torch.device("cpu")
+        base_sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
+        batch_sampler = BatchSampler(base_sampler, batch_size=batch_size, drop_last=drop_last)
+        self.loader = DataLoader(dataset, sampler=batch_sampler, batch_size=None,
+                                 collate_fn=_identity_collate)
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        n_features = self.dataset.num_features
+        for rows, cols, batch_size, targets in self.loader:
+            data = torch.zeros(batch_size, n_features, device=self.device)
+            data[rows.to(self.device), cols.to(self.device)] = 1.0
+            yield data, targets.to(self.device)
+
+
+def make_scatter_loader(features, results, batch_size=16, shuffle=True, device=None):
+    """Build a :class:`ScatterLoader` over a CSR feature matrix and target array."""
+    dataset = BatchIndexCSRDataset(features, results)
+    return ScatterLoader(dataset, batch_size=batch_size, shuffle=shuffle, device=device)
 
 
 def add_ocb(features):
