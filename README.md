@@ -79,27 +79,58 @@ entries per 772-dim position is far smaller than dense storage.
 
 ## Stage 2: Training
 
-Datasets are loaded from `../datasets/` by `loader.py`. The main training entry point is
-`script.py`:
+The training entry point is **`train_net.py`**, which selects datasets from the command line
+(no need to edit a hardcoded list as the old `script.py` required):
 
 ```bash
 cd src
-python script.py --name my_model --batch-size 256 --init-lr 0.008 --min-lr 0.0001 --epochs-per-step 2
+python train_net.py --name my_model --datasets all --exclude vEnd \
+    --batch-size 256 --init-lr 0.008 --min-lr 0.0001 --epochs-per-step 2
 ```
 
-Useful flags: `--device N` (CUDA device index), `--no-cuda`, `--load <path>` (load an existing
-checkpoint instead of training), `--log-freq`.
+### Selecting datasets (`--datasets`)
+
+Datasets live in `--data-dir` (default `../datasets/`) as `features_desk_v{tag}.npz` /
+`targets_desk_v{tag}.npz` pairs. `--datasets` takes any mix of:
+
+- version tags — `5`, `100a`
+- inclusive ranges — `200-221`
+- special names — `vEnd`
+- `all` — every numeric version
+
+The **newest variant always wins**: if both `v100` and `v100a` exist, selecting either `100`
+or `100a` loads `v100a` (the `a` revision supersedes the plain one). A leading `v` is optional.
+`--exclude` drops datasets using the same grammar; `--list` prints the resolved selection and
+exits without training. Examples:
+
+```bash
+python train_net.py --datasets 200-221            # one numbered range
+python train_net.py --datasets 2 5 100a vEnd      # explicit mix
+python train_net.py --datasets all --exclude 50 51 vEnd
+python train_net.py --datasets all --list         # preview, don't train
+```
+
+Other useful flags: `--portion` (subsample each dataset), `--val-name` (validation set, default
+`validation_games`), `--model`/`--d`/`--fd`/`--num-inputs` (architecture; defaults reproduce the
+deployed `NetRelHD(d=16, fd=64, num_inputs=768)`), `--load <ckpt>`, `--device N`, `--no-cuda`,
+`--lr-mult`, `--log-freq`.
 
 Loading helpers in `loader.py`:
 
 - `load_features_results(name)` / `load_dataset(name)` — load a single `features_{name}.npz` +
   `targets_{name}.npz` pair.
-- `load_from_multiple([2, 5, 6, ...])` — concatenate several `features_desk_v{n}.npz` /
-  `targets_desk_v{n}.npz` datasets, with optional per-dataset subsampling (`portion`).
+- `load_from_multiple([...])` — concatenate several `features_desk_v{tag}.npz` /
+  `targets_desk_v{tag}.npz` datasets, with optional per-dataset subsampling (`portion`).
+- `discover_dataset_tags(dir)` / `select_dataset_tags(tokens, available)` — the dataset
+  discovery and newest-variant selection used by `train_net.py`.
+- `make_scatter_loader(features, results, batch_size, shuffle, device)` — wraps the data in a
+  `ScatterLoader`, which densifies each one-hot batch directly on the training device (only the
+  active column indices cross to the GPU, not full 772-wide dense rows).
 
 Training (`train.py`) optimizes a combined WDL MSE + cross-entropy loss and periodically saves
 both `{name}.pt` (PyTorch state dict) and `{name}.bin` (raw little-endian weight buffer consumed
-by Winter via `model.serialize`).
+by Winter via `model.serialize`). The older `script.py` (hardcoded dataset list) is kept for
+reference but `train_net.py` is the preferred entry point.
 
 ## The model currently used by the Winter engine
 

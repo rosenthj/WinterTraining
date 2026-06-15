@@ -1,4 +1,6 @@
+import glob
 import os
+import re
 
 import numpy as np
 import scipy
@@ -6,6 +8,109 @@ import torch
 import random
 
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
+
+
+# Matches a numeric dataset version with an optional lowercase revision suffix, e.g.
+# "100" -> (100, ""), "100a" -> (100, "a"). Non-matching tags (e.g. "End") are treated
+# as standalone "special" datasets that are never deduplicated.
+_VERSION_RE = re.compile(r'^(\d+)([a-z]*)$')
+
+
+def discover_dataset_tags(data_dir, prefix="features_desk_v", suffix=".npz"):
+    """Return the version tags of every desk dataset present in ``data_dir``.
+
+    A tag is the part of the filename between ``prefix`` and ``suffix`` -- e.g.
+    ``features_desk_v100a.npz`` yields the tag ``"100a"``.
+    """
+    tags = []
+    for path in sorted(glob.glob(os.path.join(data_dir, f"{prefix}*{suffix}"))):
+        name = os.path.basename(path)
+        tags.append(name[len(prefix):-len(suffix)])
+    return tags
+
+
+def newest_variants(tags):
+    """Collapse a list of tags to the newest variant of each numeric version.
+
+    Returns ``(numeric, specials)`` where ``numeric`` maps an integer base version to
+    ``(suffix, tag)`` for the newest variant (a longer/greater suffix is newer, so
+    ``100a`` supersedes ``100``), and ``specials`` maps each non-numeric tag to itself.
+    """
+    numeric = {}
+    specials = {}
+    for tag in tags:
+        m = _VERSION_RE.match(tag)
+        if m:
+            base, suffix = int(m.group(1)), m.group(2)
+            current = numeric.get(base)
+            if current is None or suffix > current[0]:
+                numeric[base] = (suffix, tag)
+        else:
+            specials[tag] = tag
+    return numeric, specials
+
+
+def _strip_v(token):
+    return token[1:] if token.startswith("v") else token
+
+
+def select_dataset_tags(tokens, available_tags, exclude=None, warn=print):
+    """Resolve CLI selection ``tokens`` against the datasets actually present.
+
+    Each token may be:
+      * ``all``            -- every numeric version (newest variant of each);
+      * a range ``200-221`` -- every numeric version in the inclusive range;
+      * a version ``5`` / ``100a`` -- that version, always resolved to its newest
+        variant (so ``100`` and ``100a`` both select ``100a``);
+      * a special name ``End`` / ``vEnd`` -- a non-numeric dataset.
+
+    A leading ``v`` is optional on any token. Missing datasets are warned about and
+    skipped. The result preserves selection order and removes duplicates and anything
+    matched by ``exclude`` (same token grammar).
+    """
+    numeric, specials = newest_variants(available_tags)
+
+    def resolve(token):
+        token = token.strip()
+        if token.lower() == "all":
+            return [numeric[base][1] for base in sorted(numeric)]
+        token = _strip_v(token)
+        if "-" in token:
+            lo, hi = token.split("-", 1)
+            if lo.isdigit() and hi.isdigit():
+                out = []
+                for i in range(int(lo), int(hi) + 1):
+                    if i in numeric:
+                        out.append(numeric[i][1])
+                    else:
+                        warn(f"No dataset found for v{i}, skipping")
+                return out
+        m = _VERSION_RE.match(token)
+        if m:
+            base, suffix = int(m.group(1)), m.group(2)
+            if base in numeric:
+                newest_suffix, tag = numeric[base]
+                if suffix and suffix != newest_suffix:
+                    warn(f"Requested v{token} but newest variant is v{tag}; using v{tag}")
+                return [tag]
+            warn(f"No dataset found for v{token}, skipping")
+            return []
+        if token in specials:
+            return [specials[token]]
+        warn(f"No dataset found for '{token}', skipping")
+        return []
+
+    selected = []
+    for token in tokens:
+        for tag in resolve(token):
+            if tag not in selected:
+                selected.append(tag)
+    if exclude:
+        excluded = set()
+        for token in exclude:
+            excluded.update(resolve(token))
+        selected = [tag for tag in selected if tag not in excluded]
+    return selected
 
 
 def load_features_results(name, data_dir="../datasets/"):
