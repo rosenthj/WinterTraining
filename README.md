@@ -202,6 +202,13 @@ is negligible — per-batch loss components are summed on-device and synced only
 - `train/positions_per_sec` — throughput (useful for spotting I/O cost from `--reload-every`)
 - `val/mse`, `val/l1` — at each `--log-freq` interval and at every epoch end (the same
   read-only validation that appears in the text logs; it has no effect on training)
+- `act/{conv,fc}_frac_zero`, `act/{conv,fc}_frac_max` — fraction of clipped-ReLU activations
+  pinned at 0 or at the max (8), i.e. saturated / "dead" units, split between the conv feature
+  map and the fully-connected hidden layer. Useful for comparing how well SGD vs. Ranger keeps
+  neurons alive. **Caveat:** `conv_frac_zero` is dominated by the piece-presence mask (empty
+  squares are structurally 0, not dead), so the clean dead-neuron signals are `fc_frac_zero`,
+  `fc_frac_max`, and `conv_frac_max`. Measured via a hooked no-grad forward at log points only,
+  with RNG/state restored, so it does not affect training.
 - `startpos/score`, `startpos/win`, `startpos/draw`, `startpos/loss` — the network's predicted
   expected score / WDL for the opening position (per epoch); a quick interpretable sanity check
   that should settle near a small white advantage

@@ -113,6 +113,61 @@ def _grad_norm(model):
     return sq.sqrt().item() if sq is not None else None
 
 
+class _ActSaturationMeter:
+    """Forward hook tallying how much of the clipped-ReLU activation is pinned at the
+    bottom (0) or top (max_val) of its range -- i.e. zero-gradient ("dead") activations.
+
+    Buckets by tensor rank so the convolutional feature map (4D) and the fully-connected
+    hidden layer (2D) are reported separately. This matters for the relative net: the conv
+    activation is multiplied by the piece-presence mask, so its bottom-clamp count is
+    dominated by structural zeros (empty squares), not dead units. The fc bucket and both
+    ``*_frac_max`` signals are therefore the clean indicators of genuinely dead neurons.
+    """
+
+    def __init__(self, max_val, eps=1e-4):
+        self.max_val = max_val
+        self.eps = eps
+        self.stats = {"conv": [0, 0, 0], "fc": [0, 0, 0]}  # [num_zero, num_max, total]
+
+    def __call__(self, module, inputs, output):
+        bucket = "fc" if output.dim() <= 2 else "conv"
+        s = self.stats[bucket]
+        s[0] += int((output <= self.eps).sum().item())
+        s[1] += int((output >= self.max_val - self.eps).sum().item())
+        s[2] += output.numel()
+
+
+def log_activation_saturation(model, data, writer, global_step):
+    """Log the fraction of saturated (dead) clipped-ReLU activations on one batch.
+
+    Uses a hooked no-grad forward with RNG and train/eval state saved and restored, so it
+    has no effect on training. Called only at log points, so the extra forward is cheap.
+    """
+    activation = getattr(model, "activation", None)
+    if not isinstance(activation, torch.nn.Module):
+        return
+    max_val = getattr(activation, "max_val", 8.0)
+    meter = _ActSaturationMeter(max_val)
+    handle = activation.register_forward_hook(meter)
+    rng_state = torch.get_rng_state()
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            if config.rec is None:
+                model(data.type(torch.float32), activate=False)
+            else:
+                model(data.type(torch.float32), activate=False, rec=0)
+    finally:
+        handle.remove()
+        model.train(was_training)
+        torch.set_rng_state(rng_state)
+    for bucket, (num_zero, num_max, total) in meter.stats.items():
+        if total:
+            writer.add_scalar(f"act/{bucket}_frac_zero", num_zero / total, global_step)
+            writer.add_scalar(f"act/{bucket}_frac_max", num_max / total, global_step)
+
+
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
                 test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None):
     model.train()
@@ -170,6 +225,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             if val_losses is not None:
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
+            log_activation_saturation(model, data, writer, global_step)
         if name is not None:
             save(model, name=name)
         recent_sums = torch.zeros(3, device=config.device)
