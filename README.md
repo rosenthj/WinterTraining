@@ -133,6 +133,19 @@ revives the old `train_v2` streaming behaviour. `--reload-every 0` (default) loa
 before. (Per-dataset fractions are also possible via the `load_from_multiple` tuple API.)
 Alternatively, raise `#SBATCH --mem` in `standby_train.sh` and keep `--portion 1.0`.
 
+### Optimizer
+
+`--optimizer sgd` (default) uses SGD with `--momentum` (0.9), historically the best performer.
+`--optimizer ranger` uses Ranger (RAdam + Lookahead + gradient centralization, from
+`ranger.py`) for experimentation. `--weight-decay` applies to either. The optimizer is recreated
+at each LR-schedule step (and its state is checkpointed/resumed), so Ranger's RAdam warmup and
+lookahead restart per step — fine for trying it out, but note Ranger typically also wants a
+lower learning rate than the SGD-tuned `--init-lr` default, e.g.:
+
+```bash
+python train_net.py --datasets all --exclude 0 vEnd --optimizer ranger --init-lr 0.001 --min-lr 1e-5
+```
+
 Loading helpers in `loader.py`:
 
 - `load_features_results(name)` / `load_dataset(name)` — load a single `features_{name}.npz` +

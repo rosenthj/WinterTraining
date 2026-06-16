@@ -72,6 +72,10 @@ def parse_args():
     parser.add_argument('--init-lr', type=float, default=0.008)
     parser.add_argument('--min-lr', type=float, default=0.0001)
     parser.add_argument('--lr-mult', type=float, default=0.5)
+    parser.add_argument('--optimizer', type=str, default="sgd", choices=["sgd", "ranger"],
+                        help="Optimizer: sgd (momentum, historical default) or ranger")
+    parser.add_argument('--momentum', type=float, default=0.9, help="SGD momentum")
+    parser.add_argument('--weight-decay', type=float, default=0.0, help="Weight decay (both optimizers)")
     parser.add_argument('--epochs-per-step', type=int, default=2)
     parser.add_argument('--log-freq', type=int, default=100000)
     parser.add_argument('--device', type=int, default=0, help="CUDA device index")
@@ -178,7 +182,9 @@ def main():
                            min_lr=args.min_lr, lr_mult=args.lr_mult,
                            epochs_per_step=args.epochs_per_step, log_freq=args.log_freq,
                            resume_state=resume_state, writer=writer,
-                           data_loader_fn=data_loader_fn, reload_every=args.reload_every)
+                           data_loader_fn=data_loader_fn, reload_every=args.reload_every,
+                           optimizer_name=args.optimizer, momentum=args.momentum,
+                           weight_decay=args.weight_decay)
     finally:
         if writer is not None:
             writer.close()

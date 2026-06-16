@@ -258,6 +258,18 @@ def latest_checkpoint(name):
     return max(paths, key=os.path.getmtime) if paths else None
 
 
+def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0):
+    """Build the optimizer selected on the CLI. SGD+momentum is the historical default;
+    Ranger (RAdam + Lookahead + gradient centralization, from ranger.py) is opt-in."""
+    name = name.lower()
+    if name == "sgd":
+        return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=weight_decay)
+    if name == "ranger":
+        from ranger import Ranger
+        return Ranger(params, lr=lr, weight_decay=weight_decay)
+    raise ValueError(f"Unknown optimizer '{name}' (expected 'sgd' or 'ranger')")
+
+
 def _move_optimizer_state(optimizer, device):
     for state in optimizer.state.values():
         for key, value in state.items():
@@ -267,7 +279,8 @@ def _move_optimizer_state(optimizer, device):
 
 def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001,
                        lr_mult=0.5, epochs_per_step=1, log_freq=100000, resume_state=None, writer=None,
-                       data_loader_fn=None, reload_every=0):
+                       data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
+                       weight_decay=0.0):
     """Train with a decaying LR schedule.
 
     Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
@@ -321,7 +334,8 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         # Recreate the optimizer at each step boundary (matching the original schedule's
         # fresh-optimizer-per-lr behaviour), restoring saved state when resuming mid-step.
         if step != cur_step:
-            optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+            optimizer = make_optimizer(optimizer_name, model.parameters(), lr, momentum=momentum,
+                                       weight_decay=weight_decay)
             if pending_opt_state is not None and pending_opt_step == step:
                 optimizer.load_state_dict(pending_opt_state)
                 _move_optimizer_state(optimizer, config.device)
