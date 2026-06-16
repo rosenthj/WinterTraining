@@ -44,6 +44,11 @@ def parse_args():
                         help="Datasets to drop from the selection (same grammar as --datasets)")
     parser.add_argument('--portion', type=float, default=1.0,
                         help="Fraction of each selected dataset to use (random subsample)")
+    parser.add_argument('--reload-every', type=int, default=0,
+                        help="Resample the training data every N epochs instead of loading it "
+                             "all once. With --portion < 1 this bounds memory (only ~portion of "
+                             "the corpus is resident) while still covering it all over time. "
+                             "0 (default) loads once.")
     parser.add_argument('--val-name', type=str, default="validation_games",
                         help="Name of the validation dataset (features_{name}.npz); empty to skip")
     parser.add_argument('--list', action='store_true',
@@ -124,11 +129,22 @@ def main():
     config.name = args.name
     print(f"Compute device is {config.device}")
 
-    # Load and concatenate the selected datasets, then scatter-densify on device.
-    features, results = load_from_multiple(tags, portion=args.portion, save_dir=args.data_dir)
-    print(f"Loaded {features.shape[0]} positions ({features.shape[1]} features each)")
-    train_loader = make_scatter_loader(features, results, batch_size=args.batch_size,
-                                       shuffle=True, device=config.device)
+    # A fresh scatter-loader over a (possibly subsampled) draw of the selected datasets.
+    def build_train_loader():
+        features, results = load_from_multiple(tags, portion=args.portion, save_dir=args.data_dir)
+        print(f"Loaded {features.shape[0]} positions ({features.shape[1]} features each)")
+        return make_scatter_loader(features, results, batch_size=args.batch_size,
+                                   shuffle=True, device=config.device)
+
+    # --reload-every > 0: stream fresh subsets during training (memory bounded by --portion).
+    # Otherwise load the data once up front, as before.
+    if args.reload_every > 0:
+        train_loader = None
+        data_loader_fn = build_train_loader
+        print(f"Resampling: drawing a fresh {args.portion:.0%} subset every {args.reload_every} epoch(s)")
+    else:
+        train_loader = build_train_loader()
+        data_loader_fn = None
 
     val_loader = None
     if args.val_name:
@@ -161,7 +177,8 @@ def main():
         scheduled_lr_train(model, train_loader, val_loader=val_loader, init_lr=args.init_lr,
                            min_lr=args.min_lr, lr_mult=args.lr_mult,
                            epochs_per_step=args.epochs_per_step, log_freq=args.log_freq,
-                           resume_state=resume_state, writer=writer)
+                           resume_state=resume_state, writer=writer,
+                           data_loader_fn=data_loader_fn, reload_every=args.reload_every)
     finally:
         if writer is not None:
             writer.close()

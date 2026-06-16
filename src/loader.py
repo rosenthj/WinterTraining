@@ -234,6 +234,14 @@ def load_dataset_ocb(name, batch_size=16, shuffle=True):
 
 
 def load_from_multiple(lst, portion=1.0, save_dir="./"):
+    """Load and concatenate several desk datasets, optionally subsampling each.
+
+    Each element of ``lst`` is either a tag (e.g. ``"100a"``) loaded at the shared
+    ``portion``, or a ``(tag, portion)`` tuple with a per-dataset fraction. When a
+    portion < 1, a fresh random subset of that fraction is drawn each call -- so calling
+    this repeatedly (see ``train_v2`` / ``train_net.py --reload-every``) streams different
+    subsets over time while keeping only ~portion of the corpus resident at once.
+    """
     def unpack(el):
         if isinstance(el, tuple):
             num, por = el
@@ -241,22 +249,22 @@ def load_from_multiple(lst, portion=1.0, save_dir="./"):
             num, por = el, portion
         return f"{save_dir}features_desk_v{num}.npz", f"{save_dir}targets_desk_v{num}.npz", por
 
-    lst = [unpack(element) for element in lst]
-    # lst = [(f"{save_dir}features_desk_v{num}.npz", f"{save_dir}targets_desk_v{num}.npz") for num in lst]
-    f, r = None, None
-    for feature_filename, label_filename, portion in lst:
+    # Accumulate into lists and vstack/concatenate once at the end: vstack-ing inside the
+    # loop recopies the whole growing matrix each iteration (O(n^2) peak memory and time).
+    feature_blocks = []
+    result_blocks = []
+    for feature_filename, label_filename, por in (unpack(el) for el in lst):
         f0 = scipy.sparse.load_npz(feature_filename)
         r0 = np.load(label_filename)['arr_0']
-        if portion < 1.0:
+        if por < 1.0:
             idx = np.arange(len(r0))
             random.shuffle(idx)
-            m_idx = int(portion * len(r0))
-            f0 = f0[idx < m_idx]
-            r0 = r0[idx < m_idx]
-        if f is None:
-            f = f0
-            r = r0
-        else:
-            f = scipy.sparse.vstack([f, f0])
-            r = np.concatenate([r, r0])
-    return f, r
+            m_idx = int(por * len(r0))
+            keep = idx < m_idx
+            f0 = f0[keep]
+            r0 = r0[keep]
+        feature_blocks.append(f0)
+        result_blocks.append(r0)
+    features = scipy.sparse.vstack(feature_blocks, format="csr")
+    results = np.concatenate(result_blocks)
+    return features, results

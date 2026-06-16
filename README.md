@@ -116,6 +116,23 @@ Other useful flags: `--portion` (subsample each dataset), `--val-name` (validati
 deployed `NetRelHD(d=16, fd=64, num_inputs=768)`), `--load <ckpt>`, `--device N`, `--no-cuda`,
 `--lr-mult`, `--log-freq`.
 
+### Large datasets that don't fit in memory (`--reload-every`)
+
+Loading every dataset at once concatenates them into a single in-memory sparse matrix, which
+can exceed the job's RAM (e.g. all 43 desk datasets at `--mem=16g`). To bound memory, use
+resampling:
+
+```bash
+python train_net.py --datasets all --exclude 0 vEnd --reload-every 1 --portion 0.25
+```
+
+With `--reload-every N`, the trainer draws a **fresh random `--portion` subset every N epochs**
+instead of holding the whole corpus. Only ~`portion` of the data is resident at any time, but
+because a new subset is drawn each reload, training still covers all of it over the run. This
+revives the old `train_v2` streaming behaviour. `--reload-every 0` (default) loads once, as
+before. (Per-dataset fractions are also possible via the `load_from_multiple` tuple API.)
+Alternatively, raise `#SBATCH --mem` in `standby_train.sh` and keep `--portion 1.0`.
+
 Loading helpers in `loader.py`:
 
 - `load_features_results(name)` / `load_dataset(name)` — load a single `features_{name}.npz` +

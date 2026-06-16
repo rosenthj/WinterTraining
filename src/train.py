@@ -228,9 +228,19 @@ def _move_optimizer_state(optimizer, device):
                 state[key] = value.to(device)
 
 
-def scheduled_lr_train(model, data_loader, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
-                       epochs_per_step=1, log_freq=100000, resume_state=None, writer=None):
+def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001,
+                       lr_mult=0.5, epochs_per_step=1, log_freq=100000, resume_state=None, writer=None,
+                       data_loader_fn=None, reload_every=0):
+    """Train with a decaying LR schedule.
+
+    Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
+    fresh loader) together with ``reload_every`` > 0 to resample the training data every
+    ``reload_every`` epochs. Resampling keeps only a subset of the corpus resident at once
+    (see ``loader.load_from_multiple``'s ``portion``) while still covering all of it over
+    time -- this is the memory-bounded streaming used for the full dataset.
+    """
     assert 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
+    assert data_loader is not None or data_loader_fn is not None, "Provide data_loader or data_loader_fn"
     # config.activation_hook = OutputHook()
     # model.activation.register_forward_hook(config.activation_hook)
     if not os.path.exists(f"../models/{config.name}"):
@@ -273,6 +283,10 @@ def scheduled_lr_train(model, data_loader, val_loader=None, loss=F.mse_loss, ini
             log(f"\nLearning rate is {lr:g} (step {step})")
             if writer is not None:
                 writer.add_scalar("train/lr", lr, global_step)
+        # In resampling mode, draw a fresh random subset every reload_every epochs (and on
+        # the first epoch of a (re)started run, where data_loader has not been built yet).
+        if data_loader_fn is not None and (data_loader is None or epoch % reload_every == 0):
+            data_loader = data_loader_fn()
         log(f"Epoch {epoch + 1}--Training on {len(data_loader.dataset)} samples"
             "----------------------------------------------------")
         _, global_step = train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
