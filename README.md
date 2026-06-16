@@ -187,7 +187,8 @@ is negligible — per-batch loss components are summed on-device and synced only
 - `train/grad_norm` — total gradient L2 norm (a per-log-point snapshot; watch for spikes /
   instability)
 - `train/positions_per_sec` — throughput (useful for spotting I/O cost from `--reload-every`)
-- `val/mse`, `val/l1` — per epoch
+- `val/mse`, `val/l1` — at each `--log-freq` interval and at every epoch end (the same
+  read-only validation that appears in the text logs; it has no effect on training)
 - `startpos/score`, `startpos/win`, `startpos/draw`, `startpos/loss` — the network's predicted
   expected score / WDL for the opening position (per epoch); a quick interpretable sanity check
   that should settle near a small white advantage

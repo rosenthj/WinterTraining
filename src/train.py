@@ -135,14 +135,21 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         nonlocal recent_sums, recent_count, recent_positions, recent_t0
         if recent_count == 0:
             return
+        # Measure the training time for this window before running validation, so the
+        # validation pass does not depress the throughput metric.
+        dt = time.perf_counter() - recent_t0
         recent = (recent_sums / recent_count).tolist()  # single host sync
         total_avg = (epoch_sums[0] / count).item()
         msg = (f"Batch {count} Recent:{recent[0]:.6f} (reg {recent[1]:.6f}, ce {recent[2]:.6f}), "
                f"Total:{total_avg:.6f}")
+        val_losses = None
         if include_val and test_loader is not None:
             if config.rec is not None and config.rec > 1:
                 msg += ", " + gen_validation_string(model, test_loader, rec=1)
-            msg += ", " + gen_validation_string(model, test_loader)
+            # Compute the validation losses once and reuse them for both the log line and
+            # the TensorBoard scalars (this is the same test() the log already ran).
+            val_losses = test(model, test_loader, base_loss=[F.mse_loss, F.l1_loss])
+            msg += f", Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}"
         log(msg)
         if writer is not None:
             writer.add_scalar("train/loss", recent[0], global_step)
@@ -153,9 +160,11 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             grad_norm = _grad_norm(model)
             if grad_norm is not None:
                 writer.add_scalar("train/grad_norm", grad_norm, global_step)
-            dt = time.perf_counter() - recent_t0
             if dt > 0:
                 writer.add_scalar("train/positions_per_sec", recent_positions / dt, global_step)
+            if val_losses is not None:
+                writer.add_scalar("val/mse", val_losses[0], global_step)
+                writer.add_scalar("val/l1", val_losses[1], global_step)
         if name is not None:
             save(model, name=name)
         recent_sums = torch.zeros(3, device=config.device)
