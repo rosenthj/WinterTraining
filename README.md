@@ -159,13 +159,24 @@ View it with:
 tensorboard --logdir logs/tb
 ```
 
-Scalars logged at each `--log-freq` interval (so the overhead is negligible — the per-batch
-loss components are summed on-device and synced only when logging): `train/loss` (the optimized
-total), `train/loss_reg` (WDL regression term) and `train/loss_ce` (cross-entropy term), plus
-`train/lr` and per-epoch `val/mse` / `val/l1`. The x-axis (`global_step` = batches seen) is
-persisted in the run state, so charts stay continuous across resumed segments. Pass
-`--no-tensorboard` to disable; if the `tensorboard` package isn't installed, training continues
-without it. (Install with `pip install tensorboard`.)
+Scalars are logged at each `--log-freq` interval and once at every epoch end (so the overhead
+is negligible — per-batch loss components are summed on-device and synced only when logging):
+
+- `train/loss` (optimized total), `train/loss_reg` (WDL regression term), `train/loss_ce`
+  (cross-entropy term)
+- `train/lr` — logged densely so it renders as a step function rather than a linearly
+  interpolated ramp
+- `train/grad_norm` — total gradient L2 norm (a per-log-point snapshot; watch for spikes /
+  instability)
+- `train/positions_per_sec` — throughput (useful for spotting I/O cost from `--reload-every`)
+- `val/mse`, `val/l1` — per epoch
+- `startpos/score`, `startpos/win`, `startpos/draw`, `startpos/loss` — the network's predicted
+  expected score / WDL for the opening position (per epoch); a quick interpretable sanity check
+  that should settle near a small white advantage
+
+The x-axis (`global_step` = batches seen) is persisted in the run state, so charts stay
+continuous across resumed segments. Pass `--no-tensorboard` to disable; if the `tensorboard`
+package isn't installed, training continues without it. (Install with `pip install tensorboard`.)
 
 ### Resuming a run
 

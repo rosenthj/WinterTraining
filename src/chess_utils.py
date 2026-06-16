@@ -125,8 +125,9 @@ def get_startpos_tensor():
 def get_startpos_eval(model):
     training = model.training
     model.eval()
+    device = next(model.parameters()).device
     with torch.no_grad():
-        pred = model(get_startpos_tensor())[0]
+        pred = model(get_startpos_tensor().to(device))[0]
     model.train(training)
     return pred, 0.5 + (pred[0] - pred[2]) / 2
 
@@ -134,10 +135,11 @@ def get_startpos_eval(model):
 def get_pos_eval(model, fen):
     training = model.training
     model.eval()
+    device = next(model.parameters()).device
     with torch.no_grad():
         feat, res = get_features(fen, "1-0", cond_h_flip=False)
         dense = np.squeeze(np.asarray(feat.todense()))
-        t = torch.Tensor(dense).view(1, 772)
+        t = torch.Tensor(dense).view(1, 772).to(device)
         pred = model(t)[0]
     model.train(training)
     return pred, 0.5 + (pred[0] - pred[2]) / 2

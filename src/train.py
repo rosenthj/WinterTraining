@@ -2,6 +2,7 @@ import config
 import glob
 import numpy as np
 import os
+import time
 import torch
 import torch.nn.functional as F
 
@@ -102,8 +103,18 @@ def gen_validation_string(model, validation_loader, rec=None):
     return f"Val mse:{test_loss[0]:.6f}, Val l1:{test_loss[1]:.6f}"
 
 
+def _grad_norm(model):
+    """Total L2 norm of the current gradients (a snapshot of the most recent batch)."""
+    sq = None
+    for p in model.parameters():
+        if p.grad is not None:
+            s = p.grad.detach().pow(2).sum()
+            sq = s if sq is None else sq + s
+    return sq.sqrt().item() if sq is not None else None
+
+
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
-                test_loader=None, name=None, writer=None, global_step=0):
+                test_loader=None, name=None, writer=None, global_step=0, lr=None):
     model.train()
     # Running sums of [total, reg, ce] kept on-device so we only synchronise (.item()) once
     # per log_freq batches instead of every batch -- cheaper than the previous per-batch
@@ -112,6 +123,46 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
     recent_sums = torch.zeros(3, device=config.device)
     count = 0
     recent_count = 0
+    recent_positions = 0
+    recent_t0 = time.perf_counter()
+
+    def flush(include_val):
+        # Emit one set of scalars for the batches since the last flush. Called every
+        # log_freq batches and once more at the end of the epoch (so every epoch yields a
+        # point even when an epoch is shorter than log_freq, and so train/lr has a sample
+        # right before each step change -- which makes it render as a clean step function
+        # rather than a linearly-interpolated ramp).
+        nonlocal recent_sums, recent_count, recent_positions, recent_t0
+        if recent_count == 0:
+            return
+        recent = (recent_sums / recent_count).tolist()  # single host sync
+        total_avg = (epoch_sums[0] / count).item()
+        msg = (f"Batch {count} Recent:{recent[0]:.6f} (reg {recent[1]:.6f}, ce {recent[2]:.6f}), "
+               f"Total:{total_avg:.6f}")
+        if include_val and test_loader is not None:
+            if config.rec is not None and config.rec > 1:
+                msg += ", " + gen_validation_string(model, test_loader, rec=1)
+            msg += ", " + gen_validation_string(model, test_loader)
+        log(msg)
+        if writer is not None:
+            writer.add_scalar("train/loss", recent[0], global_step)
+            writer.add_scalar("train/loss_reg", recent[1], global_step)
+            writer.add_scalar("train/loss_ce", recent[2], global_step)
+            if lr is not None:
+                writer.add_scalar("train/lr", lr, global_step)
+            grad_norm = _grad_norm(model)
+            if grad_norm is not None:
+                writer.add_scalar("train/grad_norm", grad_norm, global_step)
+            dt = time.perf_counter() - recent_t0
+            if dt > 0:
+                writer.add_scalar("train/positions_per_sec", recent_positions / dt, global_step)
+        if name is not None:
+            save(model, name=name)
+        recent_sums = torch.zeros(3, device=config.device)
+        recent_count = 0
+        recent_positions = 0
+        recent_t0 = time.perf_counter()
+
     for (data, target) in train_loader:
         # data = randomize_piece_positions(data, rng_piece_positions)
         data, target = data.to(config.device), target.to(config.device)
@@ -131,25 +182,11 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             recent_sums += batch_stats
         count += 1
         recent_count += 1
+        recent_positions += target.shape[0]
         global_step += 1
         if count % log_freq == 0:
-            recent = (recent_sums / recent_count).tolist()  # single host sync
-            total_avg = (epoch_sums[0] / count).item()
-            batch_res_str = (f"Batch {count} Recent:{recent[0]:.6f} (reg {recent[1]:.6f}, ce {recent[2]:.6f}), "
-                             f"Total:{total_avg:.6f}")
-            if test_loader is not None:
-                if config.rec is not None and config.rec > 1:
-                    batch_res_str += ", " + gen_validation_string(model, test_loader, rec=1)
-                batch_res_str += ", " + gen_validation_string(model, test_loader)
-            log(batch_res_str)
-            if writer is not None:
-                writer.add_scalar("train/loss", recent[0], global_step)
-                writer.add_scalar("train/loss_reg", recent[1], global_step)
-                writer.add_scalar("train/loss_ce", recent[2], global_step)
-            if name is not None:
-                save(model, name=name)
-            recent_sums = torch.zeros(3, device=config.device)
-            recent_count = 0
+            flush(include_val=True)
+    flush(include_val=False)  # capture the tail of the epoch (no extra validation pass)
     avg_loss = (epoch_sums[0] / count).item() if count else 0.0
     return avg_loss, global_step
 
@@ -262,6 +299,17 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         pending_opt_step = resume_state.get("step")
         log(f"Resuming schedule at epoch {start_epoch + 1} (step {start_epoch // epochs_per_step})")
 
+    # The start-position eval is a cheap, interpretable sanity metric: the network's
+    # predicted expected score / WDL for the opening position, which should settle near a
+    # small white advantage as training progresses. Imported lazily (needs python-chess);
+    # if unavailable it is simply skipped.
+    startpos_eval = None
+    if writer is not None:
+        try:
+            from chess_utils import get_startpos_eval as startpos_eval
+        except Exception as e:
+            log(f"start-position metric unavailable: {e}")
+
     epoch = start_epoch
     optimizer = None
     cur_step = None
@@ -281,17 +329,17 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
             pending_opt_state = None
             cur_step = step
             log(f"\nLearning rate is {lr:g} (step {step})")
-            if writer is not None:
-                writer.add_scalar("train/lr", lr, global_step)
         # In resampling mode, draw a fresh random subset every reload_every epochs (and on
         # the first epoch of a (re)started run, where data_loader has not been built yet).
         if data_loader_fn is not None and (data_loader is None or epoch % reload_every == 0):
             data_loader = data_loader_fn()
         log(f"Epoch {epoch + 1}--Training on {len(data_loader.dataset)} samples"
             "----------------------------------------------------")
+        # lr is logged densely inside train_epoch (at each log point + epoch end) so the
+        # train/lr curve reads as a step function instead of an interpolated ramp.
         _, global_step = train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
                                      test_loader=val_loader, name=config.name, writer=writer,
-                                     global_step=global_step)
+                                     global_step=global_step, lr=lr)
         epoch += 1
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
         save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)
@@ -301,6 +349,17 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
             if writer is not None:
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
+        if writer is not None and startpos_eval is not None:
+            try:
+                pred, score = startpos_eval(model)
+                pred = pred.tolist()
+                writer.add_scalar("startpos/score", float(score), global_step)
+                writer.add_scalar("startpos/win", pred[0], global_step)
+                writer.add_scalar("startpos/draw", pred[1], global_step)
+                writer.add_scalar("startpos/loss", pred[2], global_step)
+            except Exception as e:
+                log(f"start-position eval failed, disabling: {e}")
+                startpos_eval = None
 
 
 def train_v2(model, data_lst, portion, iters, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
