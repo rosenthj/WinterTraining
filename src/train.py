@@ -114,7 +114,7 @@ def _grad_norm(model):
 
 
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
-                test_loader=None, name=None, writer=None, global_step=0, lr=None):
+                test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None):
     model.train()
     # Running sums of [total, reg, ce] kept on-device so we only synchronise (.item()) once
     # per log_freq batches instead of every batch -- cheaper than the previous per-batch
@@ -125,6 +125,9 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
     recent_count = 0
     recent_positions = 0
     recent_t0 = time.perf_counter()
+    # Pre-clip gradient norm of the most recent batch (returned by clip_grad_norm_), so the
+    # train/grad_norm metric still shows true spikes even when clipping is active.
+    last_grad_norm = None
 
     def flush(include_val):
         # Emit one set of scalars for the batches since the last flush. Called every
@@ -157,7 +160,9 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             writer.add_scalar("train/loss_ce", recent[2], global_step)
             if lr is not None:
                 writer.add_scalar("train/lr", lr, global_step)
-            grad_norm = _grad_norm(model)
+            # Prefer the pre-clip norm captured during the step; fall back to a direct
+            # measurement when clipping is off.
+            grad_norm = last_grad_norm.item() if last_grad_norm is not None else _grad_norm(model)
             if grad_norm is not None:
                 writer.add_scalar("train/grad_norm", grad_norm, global_step)
             if dt > 0:
@@ -183,6 +188,10 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             output = model(data.type(torch.float32), activate=False, rec=torch.randint(config.rec, (1,)).item())
         total, reg, ce = loss_components(output, target, base_loss=base_loss)
         total.backward()
+        if clip_grad_norm:
+            # clip_grad_norm_ returns the total norm *before* clipping (kept on-device; only
+            # synced to host at log time) and rescales the gradients in place.
+            last_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
         optimizer.step()
 
         with torch.no_grad():
@@ -267,15 +276,17 @@ def latest_checkpoint(name):
     return max(paths, key=os.path.getmtime) if paths else None
 
 
-def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0):
+def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0, eps=1e-5, betas=(0.95, 0.999)):
     """Build the optimizer selected on the CLI. SGD+momentum is the historical default;
-    Ranger (RAdam + Lookahead + gradient centralization, from ranger.py) is opt-in."""
+    Ranger (RAdam + Lookahead + gradient centralization, from ranger.py) is opt-in.
+    ``eps`` and ``betas`` apply to Ranger only (raising eps damps the adaptive step in
+    flat regions, which is the usual cure for late Adam-family divergence)."""
     name = name.lower()
     if name == "sgd":
         return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=weight_decay)
     if name == "ranger":
         from ranger import Ranger
-        return Ranger(params, lr=lr, weight_decay=weight_decay)
+        return Ranger(params, lr=lr, weight_decay=weight_decay, eps=eps, betas=betas)
     raise ValueError(f"Unknown optimizer '{name}' (expected 'sgd' or 'ranger')")
 
 
@@ -294,7 +305,8 @@ def _move_optimizer_state(optimizer, device):
 def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001,
                        lr_mult=0.5, epochs_per_step=1, log_freq=100000, resume_state=None, writer=None,
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
-                       weight_decay=0.0, persistent_optimizer=False):
+                       weight_decay=0.0, persistent_optimizer=False, eps=1e-5, betas=(0.95, 0.999),
+                       clip_grad_norm=None):
     """Train with a decaying LR schedule.
 
     Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
@@ -352,7 +364,7 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         #    drops, which is how Ranger is meant to be run.
         if optimizer is None:
             optimizer = make_optimizer(optimizer_name, model.parameters(), lr, momentum=momentum,
-                                       weight_decay=weight_decay)
+                                       weight_decay=weight_decay, eps=eps, betas=betas)
             # On resume restore the saved state: always in persistent mode (one continuous
             # optimizer), otherwise only when it belongs to this step (a fresh optimizer is
             # wanted when resuming exactly at a new step boundary).
@@ -382,7 +394,7 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         # train/lr curve reads as a step function instead of an interpolated ramp.
         _, global_step = train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
                                      test_loader=val_loader, name=config.name, writer=writer,
-                                     global_step=global_step, lr=lr)
+                                     global_step=global_step, lr=lr, clip_grad_norm=clip_grad_norm)
         epoch += 1
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
         save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)

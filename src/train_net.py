@@ -80,6 +80,14 @@ def parse_args():
                         help="Keep one optimizer across the whole LR schedule (just change its LR "
                              "per step) instead of recreating it each step. Recommended for ranger, "
                              "which relies on long-horizon Adam/Lookahead state.")
+    parser.add_argument('--eps', type=float, default=1e-5,
+                        help="Ranger epsilon. Raise it (e.g. 1e-3) to damp the adaptive step in "
+                             "flat regions and curb late Adam-family divergence.")
+    parser.add_argument('--beta1', type=float, default=0.95, help="Ranger beta1 (momentum)")
+    parser.add_argument('--beta2', type=float, default=0.999, help="Ranger beta2 (second moment)")
+    parser.add_argument('--clip-grad-norm', type=float, default=None,
+                        help="Clip the total gradient norm to this value each step (safety net "
+                             "against runaway gradients). Off by default.")
     parser.add_argument('--epochs-per-step', type=int, default=2)
     parser.add_argument('--log-freq', type=int, default=100000)
     parser.add_argument('--device', type=int, default=0, help="CUDA device index")
@@ -189,7 +197,9 @@ def main():
                            data_loader_fn=data_loader_fn, reload_every=args.reload_every,
                            optimizer_name=args.optimizer, momentum=args.momentum,
                            weight_decay=args.weight_decay,
-                           persistent_optimizer=args.persistent_optimizer)
+                           persistent_optimizer=args.persistent_optimizer,
+                           eps=args.eps, betas=(args.beta1, args.beta2),
+                           clip_grad_norm=args.clip_grad_norm)
     finally:
         if writer is not None:
             writer.close()

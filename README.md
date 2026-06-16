@@ -151,6 +151,19 @@ python train_net.py --datasets all --exclude 0 vEnd \
     --optimizer ranger --persistent-optimizer --init-lr 0.002 --min-lr 1e-5
 ```
 
+Ranger tuning knobs: `--eps` (default `1e-5`), `--beta1` / `--beta2` (defaults `0.95` / `0.999`).
+If Ranger's loss *diverges late* (creeps up first, with `train/grad_norm` rising only
+afterwards), the cause is the adaptive step blowing up in flat regions as the second moment
+shrinks — **raise `--eps`** (try `1e-3`, up to `1e-2`) rather than only lowering the LR, which
+merely delays it. `--clip-grad-norm <v>` clips the total gradient norm each step as a safety net
+(off by default; `train/grad_norm` still reports the pre-clip value so spikes stay visible —
+read it off TensorBoard to pick `v`). Example:
+
+```bash
+python train_net.py --datasets all --exclude 0 vEnd --optimizer ranger --persistent-optimizer \
+    --init-lr 0.001 --min-lr 1e-6 --eps 1e-3 --clip-grad-norm 4
+```
+
 Loading helpers in `loader.py`:
 
 - `load_features_results(name)` / `load_dataset(name)` — load a single `features_{name}.npz` +
