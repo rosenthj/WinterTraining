@@ -270,6 +270,11 @@ def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0):
     raise ValueError(f"Unknown optimizer '{name}' (expected 'sgd' or 'ranger')")
 
 
+def _set_lr(optimizer, lr):
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+
+
 def _move_optimizer_state(optimizer, device):
     for state in optimizer.state.values():
         for key, value in state.items():
@@ -280,7 +285,7 @@ def _move_optimizer_state(optimizer, device):
 def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001,
                        lr_mult=0.5, epochs_per_step=1, log_freq=100000, resume_state=None, writer=None,
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
-                       weight_decay=0.0):
+                       weight_decay=0.0, persistent_optimizer=False):
     """Train with a decaying LR schedule.
 
     Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
@@ -331,16 +336,31 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         lr = init_lr * (lr_mult ** step)
         if lr < min_lr:
             break
-        # Recreate the optimizer at each step boundary (matching the original schedule's
-        # fresh-optimizer-per-lr behaviour), restoring saved state when resuming mid-step.
-        if step != cur_step:
+        # Optimizer handling at each LR-schedule step:
+        #  - default: recreate a fresh optimizer per step (the original behaviour);
+        #  - persistent_optimizer: build it once and span the whole run, just updating the
+        #    learning rate at each step -- this preserves Adam/Lookahead state across LR
+        #    drops, which is how Ranger is meant to be run.
+        if optimizer is None:
             optimizer = make_optimizer(optimizer_name, model.parameters(), lr, momentum=momentum,
                                        weight_decay=weight_decay)
-            if pending_opt_state is not None and pending_opt_step == step:
+            # On resume restore the saved state: always in persistent mode (one continuous
+            # optimizer), otherwise only when it belongs to this step (a fresh optimizer is
+            # wanted when resuming exactly at a new step boundary).
+            if pending_opt_state is not None and (persistent_optimizer or pending_opt_step == step):
                 optimizer.load_state_dict(pending_opt_state)
                 _move_optimizer_state(optimizer, config.device)
-                log(f"Restored optimizer state for step {step}")
+                _set_lr(optimizer, lr)  # the restored state may carry an older step's lr
+                log(f"Restored optimizer state ({'persistent' if persistent_optimizer else f'step {step}'})")
             pending_opt_state = None
+            cur_step = step
+            log(f"\nLearning rate is {lr:g} (step {step})")
+        elif step != cur_step:
+            if persistent_optimizer:
+                _set_lr(optimizer, lr)
+            else:
+                optimizer = make_optimizer(optimizer_name, model.parameters(), lr, momentum=momentum,
+                                           weight_decay=weight_decay)
             cur_step = step
             log(f"\nLearning rate is {lr:g} (step {step})")
         # In resampling mode, draw a fresh random subset every reload_every epochs (and on

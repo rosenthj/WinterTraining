@@ -137,13 +137,18 @@ Alternatively, raise `#SBATCH --mem` in `standby_train.sh` and keep `--portion 1
 
 `--optimizer sgd` (default) uses SGD with `--momentum` (0.9), historically the best performer.
 `--optimizer ranger` uses Ranger (RAdam + Lookahead + gradient centralization, from
-`ranger.py`) for experimentation. `--weight-decay` applies to either. The optimizer is recreated
-at each LR-schedule step (and its state is checkpointed/resumed), so Ranger's RAdam warmup and
-lookahead restart per step — fine for trying it out, but note Ranger typically also wants a
-lower learning rate than the SGD-tuned `--init-lr` default, e.g.:
+`ranger.py`) for experimentation. `--weight-decay` applies to either. Ranger typically wants a
+much lower learning rate than the SGD-tuned `--init-lr` (Adam scale, ~10–30× smaller).
+
+By default the optimizer is recreated at each LR-schedule step. For Ranger, add
+`--persistent-optimizer` so a single optimizer spans the whole run (its LR is set externally at
+each step), preserving the RAdam/Lookahead state that Ranger relies on — this is how Ranger is
+meant to run. The persistent optimizer's state is checkpointed and restored across resumed
+segments like everything else.
 
 ```bash
-python train_net.py --datasets all --exclude 0 vEnd --optimizer ranger --init-lr 0.001 --min-lr 1e-5
+python train_net.py --datasets all --exclude 0 vEnd \
+    --optimizer ranger --persistent-optimizer --init-lr 0.002 --min-lr 1e-5
 ```
 
 Loading helpers in `loader.py`:

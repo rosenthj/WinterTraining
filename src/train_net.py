@@ -76,6 +76,10 @@ def parse_args():
                         help="Optimizer: sgd (momentum, historical default) or ranger")
     parser.add_argument('--momentum', type=float, default=0.9, help="SGD momentum")
     parser.add_argument('--weight-decay', type=float, default=0.0, help="Weight decay (both optimizers)")
+    parser.add_argument('--persistent-optimizer', action='store_true', default=False,
+                        help="Keep one optimizer across the whole LR schedule (just change its LR "
+                             "per step) instead of recreating it each step. Recommended for ranger, "
+                             "which relies on long-horizon Adam/Lookahead state.")
     parser.add_argument('--epochs-per-step', type=int, default=2)
     parser.add_argument('--log-freq', type=int, default=100000)
     parser.add_argument('--device', type=int, default=0, help="CUDA device index")
@@ -184,7 +188,8 @@ def main():
                            resume_state=resume_state, writer=writer,
                            data_loader_fn=data_loader_fn, reload_every=args.reload_every,
                            optimizer_name=args.optimizer, momentum=args.momentum,
-                           weight_decay=args.weight_decay)
+                           weight_decay=args.weight_decay,
+                           persistent_optimizer=args.persistent_optimizer)
     finally:
         if writer is not None:
             writer.close()
