@@ -71,7 +71,27 @@ def parse_args():
     parser.add_argument('--log-freq', type=int, default=100000)
     parser.add_argument('--device', type=int, default=0, help="CUDA device index")
     parser.add_argument('--no-cuda', action='store_true', default=False, help="Force CPU training")
+
+    # Logging
+    parser.add_argument('--no-tensorboard', action='store_true', default=False,
+                        help="Disable TensorBoard logging")
+    parser.add_argument('--tb-dir', type=str, default="../logs/tb",
+                        help="TensorBoard log root; this run logs to <tb-dir>/<name>")
     return parser.parse_args()
+
+
+def make_writer(args):
+    """Create a TensorBoard SummaryWriter for this run, or return None if disabled/unavailable."""
+    if args.no_tensorboard:
+        return None
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError:
+        print("TensorBoard not available (pip install tensorboard); continuing without it.")
+        return None
+    log_dir = os.path.join(args.tb_dir, args.name)
+    print(f"TensorBoard logging to {log_dir}")
+    return SummaryWriter(log_dir=log_dir)
 
 
 def main():
@@ -136,10 +156,15 @@ def main():
         print(f"Loaded weights from {args.load}")
     model.to(config.device)
 
-    scheduled_lr_train(model, train_loader, val_loader=val_loader, init_lr=args.init_lr,
-                       min_lr=args.min_lr, lr_mult=args.lr_mult,
-                       epochs_per_step=args.epochs_per_step, log_freq=args.log_freq,
-                       resume_state=resume_state)
+    writer = make_writer(args)
+    try:
+        scheduled_lr_train(model, train_loader, val_loader=val_loader, init_lr=args.init_lr,
+                           min_lr=args.min_lr, lr_mult=args.lr_mult,
+                           epochs_per_step=args.epochs_per_step, log_freq=args.log_freq,
+                           resume_state=resume_state, writer=writer)
+    finally:
+        if writer is not None:
+            writer.close()
     return 0
 
 

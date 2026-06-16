@@ -13,9 +13,20 @@ def loss_f(pred, target, base_loss=F.mse_loss):
     return base_loss(pred[:, 0] - pred[:, 2], 1.0 - target)
 
 
-def loss_combined(pred_logit, target, base_loss=F.mse_loss):
+def loss_components(pred_logit, target, base_loss=F.mse_loss):
+    """Return ``(total, reg, ce)``: the optimized loss and its two components.
+
+    ``reg`` is the WDL regression term (``base_loss`` on the win-minus-loss probability),
+    ``ce`` is the cross-entropy term, and ``total = reg + 0.04 * ce`` is what is optimized.
+    """
     pred = F.softmax(pred_logit, dim=-1)
-    return loss_f(pred, target, base_loss) + 0.04 * F.cross_entropy(pred_logit, target)
+    reg = loss_f(pred, target, base_loss)
+    ce = F.cross_entropy(pred_logit, target)
+    return reg + 0.04 * ce, reg, ce
+
+
+def loss_combined(pred_logit, target, base_loss=F.mse_loss):
+    return loss_components(pred_logit, target, base_loss)[0]
 
 
 def randomize_piece_positions(x, randomization):
@@ -92,54 +103,55 @@ def gen_validation_string(model, validation_loader, rec=None):
 
 
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
-                test_loader=None, name=None):
+                test_loader=None, name=None, writer=None, global_step=0):
     model.train()
-    loss_sum = 0
-    recent_loss = 0
+    # Running sums of [total, reg, ce] kept on-device so we only synchronise (.item()) once
+    # per log_freq batches instead of every batch -- cheaper than the previous per-batch
+    # loss.item() while still exposing the loss components.
+    epoch_sums = torch.zeros(3, device=config.device)
+    recent_sums = torch.zeros(3, device=config.device)
     count = 0
-    custom_ce_loss_weights = torch.Tensor([1.0, 0.2, 1.0])
+    recent_count = 0
     for (data, target) in train_loader:
         # data = randomize_piece_positions(data, rng_piece_positions)
         data, target = data.to(config.device), target.to(config.device)
         optimizer.zero_grad()
-        # config.activation_hook.clear()
-
-        # output = model(data.type(torch.float32), activate=True)
-        # loss = F.binary_cross_entropy(output, F.one_hot(target, num_classes=3).type(torch.float32))#, weight=custom_ce_loss_weights)
 
         if config.rec is None:
             output = model(data.type(torch.float32), activate=False)
         else:
             output = model(data.type(torch.float32), activate=False, rec=torch.randint(config.rec, (1,)).item())
-        # loss = F.cross_entropy(output, target)
-        loss = loss_combined(output, target, base_loss=base_loss)
-        # l1_penalty = 0.
-        # for output in config.activation_hook:
-        #     l1_penalty += torch.norm(output, 1)
-        # l1_penalty *= 0.0001
-        # loss += l1_penalty
-
-        # output = model(data.type(torch.float32))
-        # loss = loss_f(output, target, base_loss=base_loss)
-
-        # loss = F.nll_loss(output[:,0::2], target[:,0::2])
-        loss_sum += loss.item()
-        recent_loss += loss.item()
-        count += 1
-        loss.backward()
+        total, reg, ce = loss_components(output, target, base_loss=base_loss)
+        total.backward()
         optimizer.step()
-        # config.activation_hook.clear()
+
+        with torch.no_grad():
+            batch_stats = torch.stack([total.detach(), reg.detach(), ce.detach()])
+            epoch_sums += batch_stats
+            recent_sums += batch_stats
+        count += 1
+        recent_count += 1
+        global_step += 1
         if count % log_freq == 0:
-            batch_res_str = f"Batch {count} Recent:{(recent_loss / log_freq):.6f}, Total:{(loss_sum / count):.6f}"
+            recent = (recent_sums / recent_count).tolist()  # single host sync
+            total_avg = (epoch_sums[0] / count).item()
+            batch_res_str = (f"Batch {count} Recent:{recent[0]:.6f} (reg {recent[1]:.6f}, ce {recent[2]:.6f}), "
+                             f"Total:{total_avg:.6f}")
             if test_loader is not None:
                 if config.rec is not None and config.rec > 1:
                     batch_res_str += ", " + gen_validation_string(model, test_loader, rec=1)
                 batch_res_str += ", " + gen_validation_string(model, test_loader)
             log(batch_res_str)
+            if writer is not None:
+                writer.add_scalar("train/loss", recent[0], global_step)
+                writer.add_scalar("train/loss_reg", recent[1], global_step)
+                writer.add_scalar("train/loss_ce", recent[2], global_step)
             if name is not None:
                 save(model, name=name)
-            recent_loss = 0
-    return loss_sum / count
+            recent_sums = torch.zeros(3, device=config.device)
+            recent_count = 0
+    avg_loss = (epoch_sums[0] / count).item() if count else 0.0
+    return avg_loss, global_step
 
 
 def save(model, path=None, name=None, epoch=None):
@@ -184,9 +196,10 @@ def training_state_path(name):
     return f"../models/{name}/{name}.state.pt"
 
 
-def save_training_state(name, optimizer, next_epoch, step):
+def save_training_state(name, optimizer, next_epoch, step, global_step=0):
     """Persist the schedule position and optimizer state so a later job can resume."""
-    torch.save({"next_epoch": next_epoch, "step": step, "optimizer": optimizer.state_dict()},
+    torch.save({"next_epoch": next_epoch, "step": step, "global_step": global_step,
+                "optimizer": optimizer.state_dict()},
                training_state_path(name))
 
 
@@ -216,7 +229,7 @@ def _move_optimizer_state(optimizer, device):
 
 
 def scheduled_lr_train(model, data_loader, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
-                       epochs_per_step=1, log_freq=100000, resume_state=None):
+                       epochs_per_step=1, log_freq=100000, resume_state=None, writer=None):
     assert 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
     # config.activation_hook = OutputHook()
     # model.activation.register_forward_hook(config.activation_hook)
@@ -226,11 +239,15 @@ def scheduled_lr_train(model, data_loader, val_loader=None, loss=F.mse_loss, ini
     # The schedule is driven by a global epoch counter: step = epoch // epochs_per_step,
     # lr = init_lr * lr_mult**step. This makes the position fully derivable from one
     # integer, so a restarted job can pick up the schedule exactly where it stopped.
+    # global_step (total batches seen) is persisted too so TensorBoard's x-axis stays
+    # continuous across restarts.
     start_epoch = 0
+    global_step = 0
     pending_opt_state = None
     pending_opt_step = None
     if resume_state is not None:
         start_epoch = resume_state.get("next_epoch", 0)
+        global_step = resume_state.get("global_step", 0)
         pending_opt_state = resume_state.get("optimizer")
         pending_opt_step = resume_state.get("step")
         log(f"Resuming schedule at epoch {start_epoch + 1} (step {start_epoch // epochs_per_step})")
@@ -254,15 +271,22 @@ def scheduled_lr_train(model, data_loader, val_loader=None, loss=F.mse_loss, ini
             pending_opt_state = None
             cur_step = step
             log(f"\nLearning rate is {lr:g} (step {step})")
+            if writer is not None:
+                writer.add_scalar("train/lr", lr, global_step)
         log(f"Epoch {epoch + 1}--Training on {len(data_loader.dataset)} samples"
             "----------------------------------------------------")
-        train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
-                    test_loader=val_loader, name=config.name)
+        _, global_step = train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
+                                     test_loader=val_loader, name=config.name, writer=writer,
+                                     global_step=global_step)
         epoch += 1
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
-        save_training_state(config.name, optimizer, next_epoch=epoch, step=step)
+        save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)
         if val_loader is not None:
-            log(f"Finished Epoch {epoch}. {gen_validation_string(model, val_loader)}")
+            val_losses = test(model, val_loader, base_loss=[F.mse_loss, F.l1_loss])
+            log(f"Finished Epoch {epoch}. Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}")
+            if writer is not None:
+                writer.add_scalar("val/mse", val_losses[0], global_step)
+                writer.add_scalar("val/l1", val_losses[1], global_step)
 
 
 def train_v2(model, data_lst, portion, iters, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,

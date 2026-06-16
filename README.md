@@ -14,6 +14,7 @@ The code lives in `src/`. The workflow has two stages:
 - Python 3
 - [`python-chess`](https://python-chess.readthedocs.io/) (`chess`, `chess.pgn`, `chess.syzygy`)
 - `numpy`, `scipy`, `torch`
+- `tensorboard` (optional; for training metrics — training runs without it if absent)
 
 Syzygy endgame tablebases are required for dataset generation. The code currently expects
 them at `../../../Chess/TB_Merged` relative to `src/` (see *Paths* below).
@@ -131,6 +132,23 @@ Training (`train.py`) optimizes a combined WDL MSE + cross-entropy loss and peri
 both `{name}.pt` (PyTorch state dict) and `{name}.bin` (raw little-endian weight buffer consumed
 by Winter via `model.serialize`). The older `script.py` (hardcoded dataset list) is kept for
 reference but `train_net.py` is the preferred entry point.
+
+### TensorBoard
+
+`train_net.py` logs to TensorBoard by default (under `--tb-dir`, default `../logs/tb/<name>`).
+View it with:
+
+```bash
+tensorboard --logdir logs/tb
+```
+
+Scalars logged at each `--log-freq` interval (so the overhead is negligible — the per-batch
+loss components are summed on-device and synced only when logging): `train/loss` (the optimized
+total), `train/loss_reg` (WDL regression term) and `train/loss_ce` (cross-entropy term), plus
+`train/lr` and per-epoch `val/mse` / `val/l1`. The x-axis (`global_step` = batches seen) is
+persisted in the run state, so charts stay continuous across resumed segments. Pass
+`--no-tensorboard` to disable; if the `tensorboard` package isn't installed, training continues
+without it. (Install with `pip install tensorboard`.)
 
 ### Resuming a run
 
