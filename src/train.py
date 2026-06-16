@@ -1,4 +1,5 @@
 import config
+import glob
 import numpy as np
 import os
 import torch
@@ -179,19 +180,89 @@ class OutputHook(list):
         self.append(output)
 
 
+def training_state_path(name):
+    return f"../models/{name}/{name}.state.pt"
+
+
+def save_training_state(name, optimizer, next_epoch, step):
+    """Persist the schedule position and optimizer state so a later job can resume."""
+    torch.save({"next_epoch": next_epoch, "step": step, "optimizer": optimizer.state_dict()},
+               training_state_path(name))
+
+
+def load_training_state(name):
+    """Return the saved schedule/optimizer state for ``name``, or None if absent."""
+    path = training_state_path(name)
+    if os.path.exists(path):
+        return torch.load(path, map_location="cpu")
+    return None
+
+
+def latest_checkpoint(name):
+    """Return the most recently modified weight checkpoint (.pt) for ``name``, or None.
+
+    Matches ``{name}_*.pt`` (e.g. ``{name}_ep3.pt``, ``{name}_tmp.pt``) but not the
+    ``{name}.state.pt`` schedule file.
+    """
+    paths = glob.glob(f"../models/{name}/{name}_*.pt")
+    return max(paths, key=os.path.getmtime) if paths else None
+
+
+def _move_optimizer_state(optimizer, device):
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
+
 def scheduled_lr_train(model, data_loader, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,
-                       epochs_per_step=1, log_freq=100000):
+                       epochs_per_step=1, log_freq=100000, resume_state=None):
     assert 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
     # config.activation_hook = OutputHook()
     # model.activation.register_forward_hook(config.activation_hook)
-    step = 0
-    lr = init_lr
-    while lr >= min_lr:
-        train(model, data_loader, epochs_per_step, lr=lr, log_freq=log_freq, loss=loss,
-              initial_epoch=(epochs_per_step * step), test_loader=val_loader)
-        lr *= lr_mult
-        step += 1
-        log(f"\nLearning rate updated to {lr}")
+    if not os.path.exists(f"../models/{config.name}"):
+        os.makedirs(f"../models/{config.name}")
+
+    # The schedule is driven by a global epoch counter: step = epoch // epochs_per_step,
+    # lr = init_lr * lr_mult**step. This makes the position fully derivable from one
+    # integer, so a restarted job can pick up the schedule exactly where it stopped.
+    start_epoch = 0
+    pending_opt_state = None
+    pending_opt_step = None
+    if resume_state is not None:
+        start_epoch = resume_state.get("next_epoch", 0)
+        pending_opt_state = resume_state.get("optimizer")
+        pending_opt_step = resume_state.get("step")
+        log(f"Resuming schedule at epoch {start_epoch + 1} (step {start_epoch // epochs_per_step})")
+
+    epoch = start_epoch
+    optimizer = None
+    cur_step = None
+    while True:
+        step = epoch // epochs_per_step
+        lr = init_lr * (lr_mult ** step)
+        if lr < min_lr:
+            break
+        # Recreate the optimizer at each step boundary (matching the original schedule's
+        # fresh-optimizer-per-lr behaviour), restoring saved state when resuming mid-step.
+        if step != cur_step:
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+            if pending_opt_state is not None and pending_opt_step == step:
+                optimizer.load_state_dict(pending_opt_state)
+                _move_optimizer_state(optimizer, config.device)
+                log(f"Restored optimizer state for step {step}")
+            pending_opt_state = None
+            cur_step = step
+            log(f"\nLearning rate is {lr:g} (step {step})")
+        log(f"Epoch {epoch + 1}--Training on {len(data_loader.dataset)} samples"
+            "----------------------------------------------------")
+        train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
+                    test_loader=val_loader, name=config.name)
+        epoch += 1
+        save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
+        save_training_state(config.name, optimizer, next_epoch=epoch, step=step)
+        if val_loader is not None:
+            log(f"Finished Epoch {epoch}. {gen_validation_string(model, val_loader)}")
 
 
 def train_v2(model, data_lst, portion, iters, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,

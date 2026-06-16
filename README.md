@@ -132,6 +132,48 @@ both `{name}.pt` (PyTorch state dict) and `{name}.bin` (raw little-endian weight
 by Winter via `model.serialize`). The older `script.py` (hardcoded dataset list) is kept for
 reference but `train_net.py` is the preferred entry point.
 
+### Resuming a run
+
+`scheduled_lr_train` decays the learning rate over a fixed schedule (`step = epoch //
+epochs_per_step`, `lr = init_lr * lr_mult**step`) and after every epoch saves:
+
+- `../models/{name}/{name}_ep{N}.pt` and `_tmp.pt` — model weights, and
+- `../models/{name}/{name}.state.pt` — the schedule position (next epoch + step) and optimizer
+  state.
+
+Passing `--auto-resume` to `train_net.py` reloads the newest checkpoint **and** that schedule
+state, so training continues exactly where it stopped (correct LR, epoch, and optimizer
+momentum) instead of restarting the schedule. Resuming an already-finished run is a no-op.
+(`--load <path>` remains a one-off weight load that does *not* resume the schedule.)
+
+## Running on a batch cluster (SLURM)
+
+The standby queue caps a job at 4 hours, so a long training run is split into chained
+~4-hour segments. Two scripts in the repo root handle this:
+
+- **`standby_train.sh`** — a single SLURM segment. It activates the conda env, `cd`s into
+  `src/`, and runs `train_net.py --name <run> --auto-resume <your args>`. Because of
+  `--auto-resume`, every segment continues the previous one's weights and LR schedule (a
+  no-op on the first segment, and on a segment cut short by the wall-clock limit it resumes
+  from the last completed epoch).
+- **`submit_chain.sh`** — enqueues N segments as a dependency chain, each held until the
+  previous finishes:
+
+  ```bash
+  ./submit_chain.sh <num_segments> <run_name> [train_net.py args...]
+  # e.g.
+  ./submit_chain.sh 6 baseline --datasets all --exclude vEnd --batch-size 256
+  ```
+
+  Every segment after the first is submitted with `--dependency=afterany:<prev_jobid>`.
+  `afterany` (not `afterok`) is deliberate: a segment that hits the 4h limit or is preempted
+  exits non-zero, and the chain must continue anyway. The trade-off is that a genuinely broken
+  run also keeps marching — watch the first segment's log under `logs/`.
+
+Monitor with `squeue -u $USER --name=wintertrain`; cancel the whole chain with
+`scancel --name=wintertrain -u $USER`. Adjust the `#SBATCH` account/partition lines in
+`standby_train.sh` to match your allocation.
+
 ## The model currently used by the Winter engine
 
 The Winter engine's `net_evaluation.cc` loads `rn16HD64b.bin` (via `INCBIN`). That network is
