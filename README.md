@@ -225,13 +225,18 @@ is negligible — per-batch loss components are summed on-device and synced only
   (the same read-only validation that appears in the text logs; it has no effect on training).
   `val/accuracy` is the fraction of positions whose argmax W/D/L class matches the result
   (random baseline ≈ 0.333); all three come from one validation pass.
-- `act/{conv,fc}_frac_zero`, `act/{conv,fc}_frac_max` — fraction of clipped-ReLU activations
-  pinned at 0 or at the max (8), i.e. saturated / "dead" units, split between the conv feature
-  map and the fully-connected hidden layer. Useful for comparing how well SGD vs. Ranger keeps
-  neurons alive. **Caveat:** `conv_frac_zero` is dominated by the piece-presence mask (empty
-  squares are structurally 0, not dead), so the clean dead-neuron signals are `fc_frac_zero`,
-  `fc_frac_max`, and `conv_frac_max`. Measured via a hooked no-grad forward at log points only,
-  with RNG/state restored, so it does not affect training.
+- `act/{conv,fc}_frac_zero`, `act/{conv,fc}_frac_max` — *per-element* fraction of clipped-ReLU
+  activations pinned at 0 or at the max (8), measured on one training batch at each log point.
+  This is a saturation/sparsity signal, **not** a dead-neuron count: `conv_frac_zero` is
+  dominated by the piece-presence mask (empty squares are structurally 0), and even `fc_frac_zero`
+  is high simply because activations are sparse. Cheap (one hooked no-grad forward, RNG/state
+  restored, no training effect).
+- `val/{conv,fc}_dead_zero`, `val/{conv,fc}_dead_max` — *per-neuron* fraction that is **dead
+  across the entire validation set**: a conv channel / fc unit that never rises above 0 (dead at
+  zero) or is always pinned at the max (dead at max). This is the true wasted-capacity metric —
+  aggregating per-neuron over all positions removes the masking confound, so `conv_dead_zero` is
+  meaningful here too. ~0 is healthy (the deployed net is exactly 0). Logged per epoch (one extra
+  read-only val pass; negligible relative to an epoch).
 - `startpos/score`, `startpos/win`, `startpos/draw`, `startpos/loss` — the network's predicted
   expected score / WDL for the opening position (per epoch); a quick interpretable sanity check
   that should settle near a small white advantage
@@ -309,6 +314,31 @@ How this was determined:
 - Engine sizes `block_size = 32 = 2·d` and `full_block_size = 128 = 2·fd` give `d=16`, `fd=64`.
   The full layer reads only the `12×64 = 768` piece-square inputs (no castling features), so
   `num_inputs = 768`. The clipped-ReLU at 8 (`clipped_relu(8)`) corresponds to `Hardtanh(0, 8)`.
+
+### Reference performance (held-out `validation_games`, 42,020 positions)
+
+These are the bar new training runs are judged against (the checkpoint `models/rn16HD64b.pt`
+loads into the architecture above with no missing/unexpected keys):
+
+| Metric | Value |
+|--------|-------|
+| WDL-MSE (`val/mse`) | 0.3075 |
+| WDL-L1 (`val/l1`)   | 0.3892 |
+| Argmax W/D/L accuracy (`val/accuracy`) | 0.679 |
+| Start-position eval | W=0.295, D=0.483, L=0.222 → expected score 0.536 |
+
+Activation health (a useful target — a well-trained net wastes no capacity):
+
+| Statistic | conv | fc |
+|-----------|------|----|
+| Neurons dead-at-zero over the whole val set (never > 0) | 0.000 | 0.000 |
+| Neurons dead-at-max over the whole val set (always = 8)  | 0.000 | 0.000 |
+| Per-element activations clamped at 0 (sparsity)          | 0.998 | 0.840 |
+
+Note the contrast: per-element saturation is high (activations are sparse), yet **no neuron is
+truly dead** — every conv channel and fc unit fires on some positions. So high `act/*_frac_zero`
+during training is sparsity, not death; the `val/*_dead_*` metrics (per-neuron, whole val set)
+are what actually indicate wasted capacity, and ~0 is healthy.
 
 ## Other scripts
 

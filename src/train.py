@@ -178,6 +178,57 @@ def log_activation_saturation(model, data, writer, global_step):
             writer.add_scalar(f"act/{bucket}_frac_max", num_max / total, global_step)
 
 
+def dead_neuron_stats(model, loader, eps=1e-4):
+    """Fraction of *neurons* that are dead across the **entire** ``loader``.
+
+    A neuron is "dead at zero" if its clipped-ReLU activation never rises above 0 on any
+    position (so it always passes zero gradient), and "dead at max" if it is always pinned
+    at the upper clip. Reductions are per channel/unit over all batch and spatial elements,
+    accumulated across the whole loader -- so unlike the per-batch ``act/*`` saturation
+    fractions this is not confounded by the piece-presence mask (across many positions every
+    square is occupied, so a never-positive channel is genuinely dead).
+
+    Returns a dict of fractions per bucket (conv channels, fc units). One read-only pass.
+    """
+    activation = getattr(model, "activation", None)
+    if not isinstance(activation, torch.nn.Module):
+        return {}
+    max_val = getattr(activation, "max_val", 8.0)
+    agg = {}  # bucket -> [running_max_per_unit, running_min_per_unit]
+
+    def hook(module, inputs, output):
+        bucket = "fc" if output.dim() <= 2 else "conv"
+        dims = [d for d in range(output.dim()) if d != 1]  # reduce all but the channel/unit dim
+        cur_max = output.amax(dim=dims)
+        cur_min = output.amin(dim=dims)
+        if bucket not in agg:
+            agg[bucket] = [cur_max.clone(), cur_min.clone()]
+        else:
+            torch.maximum(agg[bucket][0], cur_max, out=agg[bucket][0])
+            torch.minimum(agg[bucket][1], cur_min, out=agg[bucket][1])
+
+    handle = activation.register_forward_hook(hook)
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for data, _ in loader:
+                data = data.to(config.device)
+                if config.rec is None:
+                    model(data.type(torch.float32), activate=False)
+                else:
+                    model(data.type(torch.float32), activate=False, rec=0)
+    finally:
+        handle.remove()
+        model.train(was_training)
+
+    stats = {}
+    for bucket, (run_max, run_min) in agg.items():
+        stats[f"{bucket}_dead_zero"] = (run_max <= eps).float().mean().item()
+        stats[f"{bucket}_dead_max"] = (run_min >= max_val - eps).float().mean().item()
+    return stats
+
+
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
                 test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None):
     model.train()
@@ -527,6 +578,12 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
                 writer.add_scalar("val/accuracy", val_acc, global_step)
+                # Per-neuron dead fractions over the whole validation set (one extra pass
+                # per epoch -- cheap relative to an epoch). conv_dead_max / fc_dead_* are the
+                # clean signals; conv_dead_zero is meaningful here (aggregated over all
+                # positions, so not masking-confounded like the per-batch act/* metric).
+                for tag, frac in dead_neuron_stats(model, val_loader).items():
+                    writer.add_scalar(f"val/{tag}", frac, global_step)
         if writer is not None and startpos_eval is not None:
             try:
                 pred, score = startpos_eval(model)
