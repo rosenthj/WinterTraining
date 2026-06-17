@@ -100,6 +100,10 @@ def parse_args():
                         help="winter_ranger Lookahead merge period in steps")
     parser.add_argument('--lookahead-alpha', type=float, default=0.5,
                         help="winter_ranger Lookahead blending factor")
+    parser.add_argument('--reg-weights-only', action='store_true', default=False,
+                        help="Apply weight decay and norm loss only to Linear/Conv weights, "
+                             "exempting biases and bias-like params (e.g. b1). Recommended for "
+                             "this architecture; mainly affects winter_ranger's norm loss.")
     parser.add_argument('--clip-grad-norm', type=float, default=None,
                         help="Clip the total gradient norm to this value each step (safety net "
                              "against runaway gradients). Off by default.")
@@ -221,7 +225,8 @@ def main():
                            persistent_optimizer=args.persistent_optimizer,
                            eps=args.eps, betas=betas, clip_grad_norm=args.clip_grad_norm,
                            normloss_factor=args.normloss_factor, pnm=not args.no_pnm,
-                           lookahead_k=args.lookahead_k, lookahead_alpha=args.lookahead_alpha)
+                           lookahead_k=args.lookahead_k, lookahead_alpha=args.lookahead_alpha,
+                           reg_weights_only=args.reg_weights_only)
     finally:
         if writer is not None:
             writer.close()

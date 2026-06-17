@@ -174,6 +174,12 @@ update is Adam-scale, so use `--init-lr ~1e-3`. Component knobs for ablation: `-
 (0 disables), `--no-pnm`, `--lookahead-k`, `--lookahead-alpha`, plus `--weight-decay` (stable,
 variance-normalized here).
 
+`--reg-weights-only` applies norm loss and weight decay to the Linear/Conv `.weight` tensors
+only, exempting biases and bias-like parameters (e.g. `b1`, the per-(channel,square) bias map).
+Recommended for this architecture — norm loss assumes a weight matrix whose first dim indexes
+neurons, so regularizing a bias map is not meaningful. It mainly changes `winter_ranger`'s norm
+loss (which is on by default); for sgd/ranger it only matters with `--weight-decay`.
+
 ```bash
 python train_net.py --datasets all --exclude 0 vEnd --optimizer winter_ranger \
     --persistent-optimizer --init-lr 0.001 --min-lr 1e-6

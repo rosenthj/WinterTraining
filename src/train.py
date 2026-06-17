@@ -367,6 +367,38 @@ def _set_lr(optimizer, lr):
         group["lr"] = lr
 
 
+def split_regularized_params(model):
+    """Split params into (regularized weight matrices, everything else).
+
+    Only the ``.weight`` of Linear/Conv layers is regularized (weight decay + norm loss);
+    biases and standalone bias-like parameters (e.g. NetRelHD.b1, a per-(channel,square)
+    bias map) are excluded, since norm loss and weight decay assume a weight matrix whose
+    first dimension indexes neurons -- applying them to a bias is not meaningful.
+    """
+    weight_ids = set()
+    regularized = []
+    for module in model.modules():
+        if isinstance(module, (torch.nn.Linear, torch.nn.modules.conv._ConvNd)):
+            w = getattr(module, "weight", None)
+            if w is not None:
+                regularized.append(w)
+                weight_ids.add(id(w))
+    others = [p for p in model.parameters() if id(p) not in weight_ids]
+    return regularized, others
+
+
+def _optimizer_params(model, reg_weights_only):
+    """Optimizer ``params`` argument: a single group, or two groups that exempt biases /
+    bias-like parameters from weight decay and norm loss when ``reg_weights_only``."""
+    if not reg_weights_only:
+        return model.parameters()
+    regularized, others = split_regularized_params(model)
+    return [
+        {"params": regularized},
+        {"params": others, "weight_decay": 0.0, "normloss_factor": 0.0},
+    ]
+
+
 def _move_optimizer_state(optimizer, device):
     for state in optimizer.state.values():
         for key, value in state.items():
@@ -379,7 +411,7 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
                        weight_decay=0.0, persistent_optimizer=False, eps=None, betas=None,
                        clip_grad_norm=None, normloss_factor=1e-4, pnm=True, lookahead_k=5,
-                       lookahead_alpha=0.5):
+                       lookahead_alpha=0.5, reg_weights_only=False):
     """Train with a decaying LR schedule.
 
     Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
@@ -436,8 +468,8 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         #    learning rate at each step -- this preserves Adam/Lookahead state across LR
         #    drops, which is how Ranger is meant to be run.
         if optimizer is None:
-            optimizer = make_optimizer(optimizer_name, model.parameters(), lr, momentum=momentum,
-                                       weight_decay=weight_decay, eps=eps, betas=betas,
+            optimizer = make_optimizer(optimizer_name, _optimizer_params(model, reg_weights_only), lr,
+                                       momentum=momentum, weight_decay=weight_decay, eps=eps, betas=betas,
                                        normloss_factor=normloss_factor, pnm=pnm,
                                        lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
             # On resume restore the saved state: always in persistent mode (one continuous
