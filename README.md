@@ -259,6 +259,29 @@ state, so training continues exactly where it stopped (correct LR, epoch, and op
 momentum) instead of restarting the schedule. Resuming an already-finished run is a no-op.
 (`--load <path>` remains a one-off weight load that does *not* resume the schedule.)
 
+### Fine-tuning / retraining from an existing model (`--init-from`)
+
+`--init-from <checkpoint.pt>` seeds a **fresh** run's weights from an existing model and then
+trains a new schedule — for retraining or continued training rather than starting from random
+init. The architecture flags must match the checkpoint (for the deployed net the defaults
+already do: `NetRelHD(d=16, fd=64, num_inputs=768)`).
+
+It is designed to compose with `--auto-resume` and the segment chain: an existing checkpoint for
+the run takes precedence, so **segment 1 seeds from the base model and later segments resume the
+fine-tune run's own checkpoints** (the base is not reloaded each segment). Example — retrain the
+current Winter model and check strength is preserved:
+
+```bash
+./submit_chain.sh 13 retrain_baseline --datasets all --exclude 0 vEnd --reload-every 1 \
+    --portion 0.25 --batch-size 64 --epochs-per-step 6 --init-lr 0.008 \
+    --init-from ../models/rn16HD64b.pt
+```
+
+Watch `val/mse` (should stay near the deployed net's **0.3075**) and `val/accuracy` (≈0.679).
+Note these are *proxies*: true playing strength must be confirmed by loading the resulting
+`.bin` into Winter and running an engine match against the original. Lower `--init-lr` keeps the
+weights closer to the base (more faithful retraining); higher LR explores further.
+
 ## Running on a batch cluster (SLURM)
 
 The standby queue caps a job at 4 hours, so a long training run is split into chained

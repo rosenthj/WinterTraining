@@ -62,6 +62,12 @@ def parse_args():
     parser.add_argument('--num-inputs', type=int, default=768, help="Number of input features used")
     parser.add_argument('--load', type=str, default=None,
                         help="Path to a checkpoint to load weights from (one-off; no schedule resume)")
+    parser.add_argument('--init-from', type=str, default=None,
+                        help="Fine-tune/retrain: initialize a FRESH run's weights from this "
+                             "checkpoint, then train a new schedule. Superseded by --auto-resume "
+                             "once the run has its own checkpoints, so it composes with "
+                             "submit_chain.sh (segment 1 seeds from the base, rest resume). The "
+                             "architecture flags must match the checkpoint.")
     parser.add_argument('--auto-resume', action='store_true', default=False,
                         help="Resume run '--name': load newest checkpoint + LR-schedule/optimizer "
                              "state from ../models/<name>/. Safe on a fresh run (nothing to resume).")
@@ -191,17 +197,26 @@ def main():
     activation = nn.Hardtanh(min_val=0, max_val=8)
     model = build_model(args, activation)
 
-    # Resume: load newest weights + the LR-schedule/optimizer state for this run.
-    # --load is a one-off weight load that does not resume the schedule.
+    # Decide the model's starting weights. Precedence under --auto-resume: an existing
+    # checkpoint for this run (continue it) > --init-from (fresh fine-tune) > random init.
+    # --init-from is thus superseded once a run has its own checkpoints, so it composes with
+    # the segment chain: segment 1 seeds from the base model, later segments resume normally.
+    # --load is a plain one-off weight load (no schedule resume) for non-resume use.
     resume_state = None
     if args.auto_resume:
         ckpt = latest_checkpoint(args.name)
         if ckpt:
             model.load_state_dict(torch.load(ckpt, map_location="cpu"))
-            print(f"Resuming: loaded weights from {ckpt}")
-        resume_state = load_training_state(args.name)
-        if resume_state is None:
-            print(f"No prior state for run '{args.name}'; starting fresh.")
+            resume_state = load_training_state(args.name)
+            print(f"Resuming run '{args.name}': loaded weights from {ckpt}")
+        elif args.init_from:
+            model.load_state_dict(torch.load(args.init_from, map_location="cpu"))
+            print(f"Fine-tuning: initialized run '{args.name}' from {args.init_from}")
+        else:
+            print(f"Starting run '{args.name}' fresh.")
+    elif args.init_from:
+        model.load_state_dict(torch.load(args.init_from, map_location="cpu"))
+        print(f"Fine-tuning: initialized from {args.init_from}")
     elif args.load:
         model.load_state_dict(torch.load(args.load, map_location="cpu"))
         print(f"Loaded weights from {args.load}")
