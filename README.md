@@ -221,8 +221,10 @@ is negligible — per-batch loss components are summed on-device and synced only
 - `train/grad_norm` — total gradient L2 norm (a per-log-point snapshot; watch for spikes /
   instability)
 - `train/positions_per_sec` — throughput (useful for spotting I/O cost from `--reload-every`)
-- `val/mse`, `val/l1` — at each `--log-freq` interval and at every epoch end (the same
-  read-only validation that appears in the text logs; it has no effect on training)
+- `val/mse`, `val/l1`, `val/accuracy` — at each `--log-freq` interval and at every epoch end
+  (the same read-only validation that appears in the text logs; it has no effect on training).
+  `val/accuracy` is the fraction of positions whose argmax W/D/L class matches the result
+  (random baseline ≈ 0.333); all three come from one validation pass.
 - `act/{conv,fc}_frac_zero`, `act/{conv,fc}_frac_max` — fraction of clipped-ReLU activations
   pinned at 0 or at the max (8), i.e. saturated / "dead" units, split between the conv feature
   map and the fully-connected hidden layer. Useful for comparing how well SGD vs. Ranger keeps

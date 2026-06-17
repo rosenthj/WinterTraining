@@ -48,13 +48,15 @@ def randomize_piece_positions(x, randomization):
     return x
 
 
-def test(model, test_loader, base_loss=F.mse_loss, rec=None):
+def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=False):
     if not isinstance(base_loss, list):
         base_loss = [base_loss]
     training = model.training
     model.eval()
     loss_sum = np.zeros(len(base_loss))
     count = 0
+    correct = 0
+    n = 0
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(config.device), target.to(config.device)
@@ -65,9 +67,17 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None):
             for i in range(len(base_loss)):
                 loss = loss_f(output, target, base_loss=base_loss[i])
                 loss_sum[i] += loss.item()
+            if return_accuracy:
+                # output is the softmax over (white-win, draw, black-win); the target is the
+                # result class, so argmax == target is a correct W/D/L call.
+                correct += (output.argmax(dim=1) == target).sum().item()
+                n += target.numel()
             count += 1
     model.train(training)
-    return loss_sum / count
+    losses = loss_sum / count
+    if return_accuracy:
+        return losses, (correct / n if n else 0.0)
+    return losses
 
 
 def get_h_mirrored_position_tensor(board_tensor):
@@ -201,13 +211,15 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         msg = (f"Batch {count} Recent:{recent[0]:.6f} (reg {recent[1]:.6f}, ce {recent[2]:.6f}), "
                f"Total:{total_avg:.6f}")
         val_losses = None
+        val_acc = None
         if include_val and test_loader is not None:
             if config.rec is not None and config.rec > 1:
                 msg += ", " + gen_validation_string(model, test_loader, rec=1)
-            # Compute the validation losses once and reuse them for both the log line and
-            # the TensorBoard scalars (this is the same test() the log already ran).
-            val_losses = test(model, test_loader, base_loss=[F.mse_loss, F.l1_loss])
-            msg += f", Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}"
+            # Compute the validation losses + accuracy once and reuse them for both the log
+            # line and the TensorBoard scalars (a single pass over the validation set).
+            val_losses, val_acc = test(model, test_loader, base_loss=[F.mse_loss, F.l1_loss],
+                                       return_accuracy=True)
+            msg += f", Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}, Val acc:{val_acc:.4f}"
         log(msg)
         if writer is not None:
             writer.add_scalar("train/loss", recent[0], global_step)
@@ -225,6 +237,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             if val_losses is not None:
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
+                writer.add_scalar("val/accuracy", val_acc, global_step)
             log_activation_saturation(model, data, writer, global_step)
         if name is not None:
             save(model, name=name)
@@ -506,11 +519,14 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
         save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)
         if val_loader is not None:
-            val_losses = test(model, val_loader, base_loss=[F.mse_loss, F.l1_loss])
-            log(f"Finished Epoch {epoch}. Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}")
+            val_losses, val_acc = test(model, val_loader, base_loss=[F.mse_loss, F.l1_loss],
+                                       return_accuracy=True)
+            log(f"Finished Epoch {epoch}. Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}, "
+                f"Val acc:{val_acc:.4f}")
             if writer is not None:
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
+                writer.add_scalar("val/accuracy", val_acc, global_step)
         if writer is not None and startpos_eval is not None:
             try:
                 pred, score = startpos_eval(model)
