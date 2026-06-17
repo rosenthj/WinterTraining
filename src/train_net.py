@@ -72,19 +72,34 @@ def parse_args():
     parser.add_argument('--init-lr', type=float, default=0.008)
     parser.add_argument('--min-lr', type=float, default=0.0001)
     parser.add_argument('--lr-mult', type=float, default=0.5)
-    parser.add_argument('--optimizer', type=str, default="sgd", choices=["sgd", "ranger"],
-                        help="Optimizer: sgd (momentum, historical default) or ranger")
+    parser.add_argument('--optimizer', type=str, default="sgd",
+                        choices=["sgd", "ranger", "winter_ranger"],
+                        help="Optimizer: sgd (momentum, historical default), ranger (Ranger2020), "
+                             "or winter_ranger (RangerLite-inspired: PNM + stable weight decay + "
+                             "norm loss + Lookahead)")
     parser.add_argument('--momentum', type=float, default=0.9, help="SGD momentum")
     parser.add_argument('--weight-decay', type=float, default=0.0, help="Weight decay (both optimizers)")
     parser.add_argument('--persistent-optimizer', action='store_true', default=False,
                         help="Keep one optimizer across the whole LR schedule (just change its LR "
                              "per step) instead of recreating it each step. Recommended for ranger, "
                              "which relies on long-horizon Adam/Lookahead state.")
-    parser.add_argument('--eps', type=float, default=1e-5,
-                        help="Ranger epsilon. Raise it (e.g. 1e-3) to damp the adaptive step in "
-                             "flat regions and curb late Adam-family divergence.")
-    parser.add_argument('--beta1', type=float, default=0.95, help="Ranger beta1 (momentum)")
-    parser.add_argument('--beta2', type=float, default=0.999, help="Ranger beta2 (second moment)")
+    parser.add_argument('--eps', type=float, default=None,
+                        help="Optimizer epsilon (Ranger variants). Default per optimizer: 1e-5 "
+                             "ranger, 1e-7 winter_ranger. Raise it (e.g. 1e-3) to damp the "
+                             "adaptive step in flat regions and curb late Adam-family divergence.")
+    parser.add_argument('--beta1', type=float, default=None,
+                        help="beta1 (Ranger variants). Default 0.95 ranger, 0.9 winter_ranger.")
+    parser.add_argument('--beta2', type=float, default=None,
+                        help="beta2 (Ranger variants). Default 0.999.")
+    # winter_ranger component knobs (defaults reproduce the full RangerLite configuration)
+    parser.add_argument('--normloss-factor', type=float, default=1e-4,
+                        help="winter_ranger norm-loss strength (0 disables)")
+    parser.add_argument('--no-pnm', action='store_true', default=False,
+                        help="winter_ranger: disable Positive-Negative Momentum (use plain Adam EMA)")
+    parser.add_argument('--lookahead-k', type=int, default=5,
+                        help="winter_ranger Lookahead merge period in steps")
+    parser.add_argument('--lookahead-alpha', type=float, default=0.5,
+                        help="winter_ranger Lookahead blending factor")
     parser.add_argument('--clip-grad-norm', type=float, default=None,
                         help="Clip the total gradient norm to this value each step (safety net "
                              "against runaway gradients). Off by default.")
@@ -188,6 +203,12 @@ def main():
         print(f"Loaded weights from {args.load}")
     model.to(config.device)
 
+    # None -> let make_optimizer pick the per-optimizer default for whichever beta is unset.
+    betas = None
+    if args.beta1 is not None or args.beta2 is not None:
+        betas = (args.beta1 if args.beta1 is not None else 0.9,
+                 args.beta2 if args.beta2 is not None else 0.999)
+
     writer = make_writer(args)
     try:
         scheduled_lr_train(model, train_loader, val_loader=val_loader, init_lr=args.init_lr,
@@ -198,8 +219,9 @@ def main():
                            optimizer_name=args.optimizer, momentum=args.momentum,
                            weight_decay=args.weight_decay,
                            persistent_optimizer=args.persistent_optimizer,
-                           eps=args.eps, betas=(args.beta1, args.beta2),
-                           clip_grad_norm=args.clip_grad_norm)
+                           eps=args.eps, betas=betas, clip_grad_norm=args.clip_grad_norm,
+                           normloss_factor=args.normloss_factor, pnm=not args.no_pnm,
+                           lookahead_k=args.lookahead_k, lookahead_alpha=args.lookahead_alpha)
     finally:
         if writer is not None:
             writer.close()

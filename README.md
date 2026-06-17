@@ -164,6 +164,21 @@ python train_net.py --datasets all --exclude 0 vEnd --optimizer ranger --persist
     --init-lr 0.001 --min-lr 1e-6 --eps 1e-3 --clip-grad-norm 4
 ```
 
+`--optimizer winter_ranger` is a RangerLite-inspired variant (`winter_ranger.py`) — Positive-
+Negative Momentum + Stable Weight Decay + Norm Loss + Lookahead — the configuration used by
+Stockfish's NNUE trainer, adapted to this codebase (Lookahead is a periodic merge into the live
+weights, so checkpoints/serialization use the averaged weights with no `eval()`/`train()` hooks;
+its numerics are verified bit-exact against `ranger_lite.py`). Defaults reproduce the full
+RangerLite config (`eps=1e-7`, `betas=(0.9, 0.999)`, norm loss + PNM on, `lookahead-k=5`); the
+update is Adam-scale, so use `--init-lr ~1e-3`. Component knobs for ablation: `--normloss-factor`
+(0 disables), `--no-pnm`, `--lookahead-k`, `--lookahead-alpha`, plus `--weight-decay` (stable,
+variance-normalized here).
+
+```bash
+python train_net.py --datasets all --exclude 0 vEnd --optimizer winter_ranger \
+    --persistent-optimizer --init-lr 0.001 --min-lr 1e-6
+```
+
 Loading helpers in `loader.py`:
 
 - `load_features_results(name)` / `load_dataset(name)` — load a single `features_{name}.npz` +

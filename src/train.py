@@ -332,18 +332,34 @@ def latest_checkpoint(name):
     return max(paths, key=os.path.getmtime) if paths else None
 
 
-def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0, eps=1e-5, betas=(0.95, 0.999)):
-    """Build the optimizer selected on the CLI. SGD+momentum is the historical default;
-    Ranger (RAdam + Lookahead + gradient centralization, from ranger.py) is opt-in.
-    ``eps`` and ``betas`` apply to Ranger only (raising eps damps the adaptive step in
-    flat regions, which is the usual cure for late Adam-family divergence)."""
+def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0, eps=None, betas=None,
+                   normloss_factor=1e-4, pnm=True, lookahead_k=5, lookahead_alpha=0.5):
+    """Build the optimizer selected on the CLI. SGD+momentum is the historical default.
+
+    ``eps`` and ``betas`` default to None, meaning "use the optimizer's own default"
+    (so each variant gets its appropriate scale). They apply to the Ranger variants only.
+    Options:
+      - sgd: SGD with momentum (best performer historically).
+      - ranger: Ranger2020 (RAdam + Lookahead + gradient centralization, ranger.py).
+      - winter_ranger: RangerLite-inspired (PNM + stable weight decay + norm loss +
+        Lookahead, winter_ranger.py); the extra args tune its components.
+    """
     name = name.lower()
     if name == "sgd":
         return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=weight_decay)
     if name == "ranger":
         from ranger import Ranger
-        return Ranger(params, lr=lr, weight_decay=weight_decay, eps=eps, betas=betas)
-    raise ValueError(f"Unknown optimizer '{name}' (expected 'sgd' or 'ranger')")
+        return Ranger(params, lr=lr, weight_decay=weight_decay,
+                      eps=1e-5 if eps is None else eps,
+                      betas=(0.95, 0.999) if betas is None else betas)
+    if name == "winter_ranger":
+        from winter_ranger import WinterRanger
+        return WinterRanger(params, lr=lr, weight_decay=weight_decay,
+                            eps=1e-7 if eps is None else eps,
+                            betas=(0.9, 0.999) if betas is None else betas,
+                            pnm=pnm, normloss_factor=normloss_factor,
+                            lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
+    raise ValueError(f"Unknown optimizer '{name}' (expected 'sgd', 'ranger' or 'winter_ranger')")
 
 
 def _set_lr(optimizer, lr):
@@ -361,8 +377,9 @@ def _move_optimizer_state(optimizer, device):
 def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001,
                        lr_mult=0.5, epochs_per_step=1, log_freq=100000, resume_state=None, writer=None,
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
-                       weight_decay=0.0, persistent_optimizer=False, eps=1e-5, betas=(0.95, 0.999),
-                       clip_grad_norm=None):
+                       weight_decay=0.0, persistent_optimizer=False, eps=None, betas=None,
+                       clip_grad_norm=None, normloss_factor=1e-4, pnm=True, lookahead_k=5,
+                       lookahead_alpha=0.5):
     """Train with a decaying LR schedule.
 
     Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
@@ -420,7 +437,9 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         #    drops, which is how Ranger is meant to be run.
         if optimizer is None:
             optimizer = make_optimizer(optimizer_name, model.parameters(), lr, momentum=momentum,
-                                       weight_decay=weight_decay, eps=eps, betas=betas)
+                                       weight_decay=weight_decay, eps=eps, betas=betas,
+                                       normloss_factor=normloss_factor, pnm=pnm,
+                                       lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
             # On resume restore the saved state: always in persistent mode (one continuous
             # optimizer), otherwise only when it belongs to this step (a fresh optimizer is
             # wanted when resuming exactly at a new step boundary).
