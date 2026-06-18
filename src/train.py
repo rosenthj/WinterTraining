@@ -48,7 +48,45 @@ def randomize_piece_positions(x, randomization):
     return x
 
 
-def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=False):
+def _activation_stats_dict(elem, agg, piece_sum, pos_count, max_val, eps):
+    """Build the activation-health TensorBoard tags from the accumulators in ``test()``.
+
+    Per-element saturation (``act/*``): fraction of clipped-ReLU values pinned at 0 / max,
+    split into the conv feature map and the fc hidden layer. ``act/conv_active_frac_zero``
+    corrects the conv zero fraction for the piece-presence mask -- most conv entries are
+    structurally 0 at empty squares; the masked fraction is ``1 - pieces/768`` (the conv
+    repeat_interleave/mirror/cat preserve density), so this isolates genuine clamping among
+    the computed entries.
+
+    Per-neuron deadness (``val/*``): channels/units that never rise above 0 (``*_dead_zero``)
+    or are always pinned at the max (``*_dead_max``) across the whole validation set. Per-neuron
+    aggregation over many positions is not masking-confounded (every square gets occupied
+    somewhere), so a never-positive channel is genuinely dead.
+    """
+    stats = {}
+    for bucket, (num_zero, num_max, total) in elem.items():
+        if total:
+            stats[f"act/{bucket}_frac_zero"] = num_zero / total
+            stats[f"act/{bucket}_frac_max"] = num_max / total
+    if pos_count and elem["conv"][2]:
+        masked_frac = 1.0 - piece_sum / (pos_count * 768)
+        if masked_frac < 1.0:
+            frac_zero = elem["conv"][0] / elem["conv"][2]
+            active = (frac_zero - masked_frac) / (1.0 - masked_frac)
+            stats["act/conv_active_frac_zero"] = min(1.0, max(0.0, active))
+    for bucket, (run_max, run_min) in agg.items():
+        stats[f"val/{bucket}_dead_zero"] = (run_max <= eps).float().mean().item()
+        stats[f"val/{bucket}_dead_max"] = (run_min >= max_val - eps).float().mean().item()
+    return stats
+
+
+def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=False, activation_stats=False):
+    """Evaluate on ``test_loader`` in one pass. Optionally also returns argmax W/D/L accuracy
+    and a dict of activation-health stats (see ``_activation_stats_dict``), all computed in the
+    same forward pass via an activation hook -- so the extra metrics cost no extra forward.
+
+    Returns ``losses`` alone, or a tuple appending accuracy and/or the stats dict, in that order.
+    """
     if not isinstance(base_loss, list):
         base_loss = [base_loss]
     training = model.training
@@ -57,9 +95,39 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=Fal
     count = 0
     correct = 0
     n = 0
+
+    # Optional activation-health accumulation, gathered during this same pass via a hook.
+    act = getattr(model, "activation", None)
+    do_act = activation_stats and isinstance(act, torch.nn.Module)
+    eps = 1e-4
+    max_val = getattr(act, "max_val", 8.0) if do_act else 8.0
+    elem = {"conv": [0, 0, 0], "fc": [0, 0, 0]}  # [num_zero, num_max, total]
+    agg = {}  # bucket -> [running_max_per_unit, running_min_per_unit]
+    piece_sum = 0.0
+    pos_count = 0
+
+    def hook(module, inputs, output):
+        bucket = "fc" if output.dim() <= 2 else "conv"
+        e = elem[bucket]
+        e[0] += int((output <= eps).sum().item())
+        e[1] += int((output >= max_val - eps).sum().item())
+        e[2] += output.numel()
+        dims = [d for d in range(output.dim()) if d != 1]  # reduce all but the channel/unit dim
+        cur_max = output.amax(dim=dims)
+        cur_min = output.amin(dim=dims)
+        if bucket not in agg:
+            agg[bucket] = [cur_max.clone(), cur_min.clone()]
+        else:
+            torch.maximum(agg[bucket][0], cur_max, out=agg[bucket][0])
+            torch.minimum(agg[bucket][1], cur_min, out=agg[bucket][1])
+
+    handle = act.register_forward_hook(hook) if do_act else None
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(config.device), target.to(config.device)
+            if do_act:
+                piece_sum += float(data[:, :768].sum().item())
+                pos_count += data.shape[0]
             if rec is None:
                 output = model(data.type(torch.float32).to(config.device))
             else:
@@ -73,11 +141,19 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=Fal
                 correct += (output.argmax(dim=1) == target).sum().item()
                 n += target.numel()
             count += 1
+    if handle is not None:
+        handle.remove()
     model.train(training)
+
     losses = loss_sum / count
+    if not (return_accuracy or activation_stats):
+        return losses
+    result = [losses]
     if return_accuracy:
-        return losses, (correct / n if n else 0.0)
-    return losses
+        result.append(correct / n if n else 0.0)
+    if activation_stats:
+        result.append(_activation_stats_dict(elem, agg, piece_sum, pos_count, max_val, eps))
+    return tuple(result)
 
 
 def get_h_mirrored_position_tensor(board_tensor):
@@ -123,112 +199,6 @@ def _grad_norm(model):
     return sq.sqrt().item() if sq is not None else None
 
 
-class _ActSaturationMeter:
-    """Forward hook tallying how much of the clipped-ReLU activation is pinned at the
-    bottom (0) or top (max_val) of its range -- i.e. zero-gradient ("dead") activations.
-
-    Buckets by tensor rank so the convolutional feature map (4D) and the fully-connected
-    hidden layer (2D) are reported separately. This matters for the relative net: the conv
-    activation is multiplied by the piece-presence mask, so its bottom-clamp count is
-    dominated by structural zeros (empty squares), not dead units. The fc bucket and both
-    ``*_frac_max`` signals are therefore the clean indicators of genuinely dead neurons.
-    """
-
-    def __init__(self, max_val, eps=1e-4):
-        self.max_val = max_val
-        self.eps = eps
-        self.stats = {"conv": [0, 0, 0], "fc": [0, 0, 0]}  # [num_zero, num_max, total]
-
-    def __call__(self, module, inputs, output):
-        bucket = "fc" if output.dim() <= 2 else "conv"
-        s = self.stats[bucket]
-        s[0] += int((output <= self.eps).sum().item())
-        s[1] += int((output >= self.max_val - self.eps).sum().item())
-        s[2] += output.numel()
-
-
-def log_activation_saturation(model, data, writer, global_step):
-    """Log the fraction of saturated (dead) clipped-ReLU activations on one batch.
-
-    Uses a hooked no-grad forward with RNG and train/eval state saved and restored, so it
-    has no effect on training. Called only at log points, so the extra forward is cheap.
-    """
-    activation = getattr(model, "activation", None)
-    if not isinstance(activation, torch.nn.Module):
-        return
-    max_val = getattr(activation, "max_val", 8.0)
-    meter = _ActSaturationMeter(max_val)
-    handle = activation.register_forward_hook(meter)
-    rng_state = torch.get_rng_state()
-    was_training = model.training
-    model.eval()
-    try:
-        with torch.no_grad():
-            if config.rec is None:
-                model(data.type(torch.float32), activate=False)
-            else:
-                model(data.type(torch.float32), activate=False, rec=0)
-    finally:
-        handle.remove()
-        model.train(was_training)
-        torch.set_rng_state(rng_state)
-    for bucket, (num_zero, num_max, total) in meter.stats.items():
-        if total:
-            writer.add_scalar(f"act/{bucket}_frac_zero", num_zero / total, global_step)
-            writer.add_scalar(f"act/{bucket}_frac_max", num_max / total, global_step)
-
-
-def dead_neuron_stats(model, loader, eps=1e-4):
-    """Fraction of *neurons* that are dead across the **entire** ``loader``.
-
-    A neuron is "dead at zero" if its clipped-ReLU activation never rises above 0 on any
-    position (so it always passes zero gradient), and "dead at max" if it is always pinned
-    at the upper clip. Reductions are per channel/unit over all batch and spatial elements,
-    accumulated across the whole loader -- so unlike the per-batch ``act/*`` saturation
-    fractions this is not confounded by the piece-presence mask (across many positions every
-    square is occupied, so a never-positive channel is genuinely dead).
-
-    Returns a dict of fractions per bucket (conv channels, fc units). One read-only pass.
-    """
-    activation = getattr(model, "activation", None)
-    if not isinstance(activation, torch.nn.Module):
-        return {}
-    max_val = getattr(activation, "max_val", 8.0)
-    agg = {}  # bucket -> [running_max_per_unit, running_min_per_unit]
-
-    def hook(module, inputs, output):
-        bucket = "fc" if output.dim() <= 2 else "conv"
-        dims = [d for d in range(output.dim()) if d != 1]  # reduce all but the channel/unit dim
-        cur_max = output.amax(dim=dims)
-        cur_min = output.amin(dim=dims)
-        if bucket not in agg:
-            agg[bucket] = [cur_max.clone(), cur_min.clone()]
-        else:
-            torch.maximum(agg[bucket][0], cur_max, out=agg[bucket][0])
-            torch.minimum(agg[bucket][1], cur_min, out=agg[bucket][1])
-
-    handle = activation.register_forward_hook(hook)
-    was_training = model.training
-    model.eval()
-    try:
-        with torch.no_grad():
-            for data, _ in loader:
-                data = data.to(config.device)
-                if config.rec is None:
-                    model(data.type(torch.float32), activate=False)
-                else:
-                    model(data.type(torch.float32), activate=False, rec=0)
-    finally:
-        handle.remove()
-        model.train(was_training)
-
-    stats = {}
-    for bucket, (run_max, run_min) in agg.items():
-        stats[f"{bucket}_dead_zero"] = (run_max <= eps).float().mean().item()
-        stats[f"{bucket}_dead_max"] = (run_min >= max_val - eps).float().mean().item()
-    return stats
-
-
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
                 test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None):
     model.train()
@@ -263,13 +233,13 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
                f"Total:{total_avg:.6f}")
         val_losses = None
         val_acc = None
+        act_stats = None
         if include_val and test_loader is not None:
             if config.rec is not None and config.rec > 1:
                 msg += ", " + gen_validation_string(model, test_loader, rec=1)
-            # Compute the validation losses + accuracy once and reuse them for both the log
-            # line and the TensorBoard scalars (a single pass over the validation set).
-            val_losses, val_acc = test(model, test_loader, base_loss=[F.mse_loss, F.l1_loss],
-                                       return_accuracy=True)
+            # One validation pass yields losses, accuracy and the activation-health stats.
+            val_losses, val_acc, act_stats = test(model, test_loader, base_loss=[F.mse_loss, F.l1_loss],
+                                                  return_accuracy=True, activation_stats=True)
             msg += f", Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}, Val acc:{val_acc:.4f}"
         log(msg)
         if writer is not None:
@@ -289,7 +259,8 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
                 writer.add_scalar("val/accuracy", val_acc, global_step)
-            log_activation_saturation(model, data, writer, global_step)
+                for tag, frac in act_stats.items():
+                    writer.add_scalar(tag, frac, global_step)
         if name is not None:
             save(model, name=name)
         recent_sums = torch.zeros(3, device=config.device)
@@ -570,20 +541,16 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
         save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)
         if val_loader is not None:
-            val_losses, val_acc = test(model, val_loader, base_loss=[F.mse_loss, F.l1_loss],
-                                       return_accuracy=True)
+            val_losses, val_acc, act_stats = test(model, val_loader, base_loss=[F.mse_loss, F.l1_loss],
+                                                  return_accuracy=True, activation_stats=True)
             log(f"Finished Epoch {epoch}. Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}, "
                 f"Val acc:{val_acc:.4f}")
             if writer is not None:
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
                 writer.add_scalar("val/accuracy", val_acc, global_step)
-                # Per-neuron dead fractions over the whole validation set (one extra pass
-                # per epoch -- cheap relative to an epoch). conv_dead_max / fc_dead_* are the
-                # clean signals; conv_dead_zero is meaningful here (aggregated over all
-                # positions, so not masking-confounded like the per-batch act/* metric).
-                for tag, frac in dead_neuron_stats(model, val_loader).items():
-                    writer.add_scalar(f"val/{tag}", frac, global_step)
+                for tag, frac in act_stats.items():
+                    writer.add_scalar(tag, frac, global_step)
         if writer is not None and startpos_eval is not None:
             try:
                 pred, score = startpos_eval(model)

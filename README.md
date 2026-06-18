@@ -221,22 +221,26 @@ is negligible — per-batch loss components are summed on-device and synced only
 - `train/grad_norm` — total gradient L2 norm (a per-log-point snapshot; watch for spikes /
   instability)
 - `train/positions_per_sec` — throughput (useful for spotting I/O cost from `--reload-every`)
-- `val/mse`, `val/l1`, `val/accuracy` — at each `--log-freq` interval and at every epoch end
-  (the same read-only validation that appears in the text logs; it has no effect on training).
-  `val/accuracy` is the fraction of positions whose argmax W/D/L class matches the result
-  (random baseline ≈ 0.333); all three come from one validation pass.
+All of the following come from **one validation pass** at each `--log-freq` interval (and at
+every epoch end) — the same read-only `test()` pass, so the activation metrics add no extra
+forward and have no effect on training:
+
+- `val/mse`, `val/l1`, `val/accuracy` — WDL regression losses and the fraction of positions
+  whose argmax W/D/L class matches the result (random baseline ≈ 0.333).
 - `act/{conv,fc}_frac_zero`, `act/{conv,fc}_frac_max` — *per-element* fraction of clipped-ReLU
-  activations pinned at 0 or at the max (8), measured on one training batch at each log point.
-  This is a saturation/sparsity signal, **not** a dead-neuron count: `conv_frac_zero` is
-  dominated by the piece-presence mask (empty squares are structurally 0), and even `fc_frac_zero`
-  is high simply because activations are sparse. Cheap (one hooked no-grad forward, RNG/state
-  restored, no training effect).
+  activations pinned at 0 or at the max (8). A saturation/sparsity signal, **not** a dead-neuron
+  count: `conv_frac_zero` is dominated by the piece-presence mask (empty squares are structurally
+  0), and even `fc_frac_zero` is high simply because activations are sparse.
+- `act/conv_active_frac_zero` — `conv_frac_zero` corrected to exclude the mask: the zero fraction
+  among only the *computed* (non-masked, piece-occupied) conv activations. The masked fraction is
+  read off the input piece planes (`1 − pieces/768`, exact because the mask density is preserved
+  through the conv/mirror/cat), so this isolates genuine activation clamping from empty-square
+  structural zeros — the meaningful per-element conv saturation signal.
 - `val/{conv,fc}_dead_zero`, `val/{conv,fc}_dead_max` — *per-neuron* fraction that is **dead
   across the entire validation set**: a conv channel / fc unit that never rises above 0 (dead at
   zero) or is always pinned at the max (dead at max). This is the true wasted-capacity metric —
   aggregating per-neuron over all positions removes the masking confound, so `conv_dead_zero` is
-  meaningful here too. ~0 is healthy (the deployed net is exactly 0). Logged per epoch (one extra
-  read-only val pass; negligible relative to an epoch).
+  meaningful here too. ~0 is healthy (the deployed net is exactly 0).
 - `startpos/score`, `startpos/win`, `startpos/draw`, `startpos/loss` — the network's predicted
   expected score / WDL for the opening position (per epoch); a quick interpretable sanity check
   that should settle near a small white advantage
