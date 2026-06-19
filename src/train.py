@@ -300,7 +300,12 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
     return avg_loss, global_step
 
 
-def save(model, path=None, name=None, epoch=None):
+def save(model, path=None, name=None, epoch=None, write_bin=None):
+    # The Winter-readable .bin is only kept for the _tmp checkpoint (the always-most-recent
+    # latest pointer, refreshed every flush) -- it's a convenience for loading into the engine.
+    # Per-epoch snapshots store only the .pt; a .bin for any of them can be regenerated later
+    # via model.serialize(). write_bin overrides this default when given.
+    is_tmp = path is None and epoch is None
     if path is None:
         assert name is not None
         if epoch is None:
@@ -308,7 +313,8 @@ def save(model, path=None, name=None, epoch=None):
         else:
             path = f"../models/{name}/{name}_ep{epoch + 1}"
     torch.save(model.state_dict(), f"{path}.pt")
-    model.serialize(f"{path}.bin", verbose=1)
+    if write_bin if write_bin is not None else is_tmp:
+        model.serialize(f"{path}.bin", verbose=1)
 
 
 def train(model, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000, loss=F.mse_loss, initial_epoch=0,

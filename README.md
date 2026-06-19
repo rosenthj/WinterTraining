@@ -197,10 +197,13 @@ Loading helpers in `loader.py`:
   `ScatterLoader`, which densifies each one-hot batch directly on the training device (only the
   active column indices cross to the GPU, not full 772-wide dense rows).
 
-Training (`train.py`) optimizes a combined WDL MSE + cross-entropy loss and periodically saves
-both `{name}.pt` (PyTorch state dict) and `{name}.bin` (raw little-endian weight buffer consumed
-by Winter via `model.serialize`). The older `script.py` (hardcoded dataset list) is kept for
-reference but `train_net.py` is the preferred entry point.
+Training (`train.py`) optimizes a combined WDL MSE + cross-entropy loss. It saves a PyTorch
+checkpoint (`.pt`) for the always-latest `{name}_tmp` and for every per-epoch snapshot
+`{name}_ep{N}`. The Winter-readable serialized weights (`.bin`, a raw little-endian buffer via
+`model.serialize`) are written **only for `{name}_tmp.bin`** — the most up-to-date model, kept
+as a convenience for loading into the engine. To get a `.bin` for a specific epoch snapshot,
+re-serialize its `.pt` with `model.serialize`. The older `script.py` (hardcoded dataset list) is
+kept for reference but `train_net.py` is the preferred entry point.
 
 ### TensorBoard
 
