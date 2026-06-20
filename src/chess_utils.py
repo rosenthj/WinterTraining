@@ -83,8 +83,7 @@ def get_board_tensor(board, sparse=False):
     features_board = np.zeros(2*6*64)
     features_castling = np.array([board.has_queenside_castling_rights(chess.WHITE), board.has_kingside_castling_rights(chess.WHITE),
                                      board.has_queenside_castling_rights(chess.BLACK), board.has_kingside_castling_rights(chess.BLACK)]).astype(np.int8)
-    for square in board.piece_map():
-        piece = board.piece_map()[square]
+    for square, piece in board.piece_map().items():
         idx = (piece.piece_type-1) * 64 + square
         if piece.color == chess.BLACK:
             idx += 6 * 64
@@ -99,20 +98,27 @@ def get_board_tensor(board, sparse=False):
 def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False, get_w_persp_result=False):
     board, result, wp_res = get_standardised_board_and_result(fen, result_str, cond_h_flip, cond_v_flip, True)
     result = torch.tensor([result])
-    features_board = np.zeros(2*6*64)
-    features_castling = np.array([board.has_queenside_castling_rights(chess.WHITE), board.has_kingside_castling_rights(chess.WHITE),
-                                     board.has_queenside_castling_rights(chess.BLACK), board.has_kingside_castling_rights(chess.BLACK)]).astype(np.int8)
-    for square in board.piece_map():
-        piece = board.piece_map()[square]
+    # The feature vector is one-hot, so build the CSR row straight from its nonzero
+    # columns instead of allocating a dense 772-vector and rescanning it for nonzeros.
+    # 0..767 piece-square columns, 768..771 castling. Identical matrix, much cheaper.
+    cols = []
+    for square, piece in board.piece_map().items():
         idx = (piece.piece_type-1) * 64 + square
         if piece.color == chess.BLACK:
             idx += 6 * 64
-        features_board[idx] = 1
-    features = np.concatenate((features_board, features_castling)).astype(np.int8)
-    assert features.shape[-1] == 772
+        cols.append(idx)
+    if board.has_queenside_castling_rights(chess.WHITE): cols.append(768)
+    if board.has_kingside_castling_rights(chess.WHITE): cols.append(769)
+    if board.has_queenside_castling_rights(chess.BLACK): cols.append(770)
+    if board.has_kingside_castling_rights(chess.BLACK): cols.append(771)
+    cols.sort()  # canonical (sorted-indices) CSR, matching scipy's dense->csr output
+    indices = np.asarray(cols, dtype=np.int32)
+    indptr = np.asarray([0, len(cols)], dtype=np.int32)
+    data = np.ones(len(cols), dtype=np.int8)
+    features = scipy.sparse.csr_matrix((data, indices, indptr), shape=(1, 772))
     if get_w_persp_result:
-        return scipy.sparse.csr_matrix(features), result, wp_res
-    return scipy.sparse.csr_matrix(features), result
+        return features, result, wp_res
+    return features, result
 
 
 def get_startpos_tensor():
