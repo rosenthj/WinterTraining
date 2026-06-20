@@ -65,27 +65,16 @@ def extract_fens_from_game(g):
     game = ItGame(g)
     game.to_start()
     lst = []
-    # assert (game._umake != None)
-    # while (game.castling_rights() != 0 or not game.is_quiet()) and not game.is_final_position():
-    #    game.make_move()
-    # if game.is_final_position():
-    #    return None
-    # lst.append(game.fen())
-    hmvc_dec = 0
     cnt = 1 + np.random.randint(2)
     while not game.is_final_position():
         game.make_move()
-        if game.halfmove_clock() == 0:
-            hmvc_dec = 0
         cnt = cnt - 1
         if cnt == 0:
-            if hmvc_dec > 0 or not game.is_quiet():
+            if not game.is_quiet():
                 cnt = 2
-                hmvc_dec -= 1
             else:
                 lst.append(game.fen())
-                hmvc_dec = 10
-                cnt = 5
+                cnt = 1
     return lst, g.headers["Result"]
 
 
@@ -158,7 +147,9 @@ def gen_dataset_helper(name, batch_size=16, shuffle=True, save=False, pgn_dir=".
     features, results = gen_dataset_from_pgn(f"{pgn_dir}{name}.pgn")
     if save:
         scipy.sparse.save_npz(f"{out_dir}features_{name}.npz", features)
-        np.savez(f"{out_dir}targets_{name}.npz", results)
+        # Labels are only {0, 1, 2}; int8 stores them exactly at 1/8th the int64 size.
+        # The loader casts to torch.long per batch, so the on-disk dtype is irrelevant.
+        np.savez(f"{out_dir}targets_{name}.npz", results.astype(np.int8))
     return torch.utils.data.DataLoader(CSRDataset(features, results), batch_size=batch_size, shuffle=shuffle)
 
 
