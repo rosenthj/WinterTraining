@@ -24,6 +24,7 @@ def main():
     config.tablebase.close()
     print(f"TB Queries: {count.total_tb_queries}")
     print(f"Results changed by TB Query: {count.tb_changed}")
+    print(f"Games skipped (regular starting position): {count.skipped_startpos}")
 
     return 0
 

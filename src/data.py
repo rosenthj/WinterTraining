@@ -74,7 +74,7 @@ def extract_fens_from_game(g):
                 cnt = 2
             else:
                 lst.append(game.fen())
-                cnt = 1
+                cnt = 3
     return lst, g.headers["Result"]
 
 
@@ -131,6 +131,13 @@ def data_from_fen_res_set(fens, res):
 
 
 def extract_data_from_game(g):
+    # Training data is DFRC and must not contain the regular chess starting position.
+    # Some older/fan-collected games may still begin from it, so drop any such game.
+    # board_fen() is the piece placement only; STARTING_BOARD_FEN matches when both
+    # back ranks are the standard rnbqkbnr/RNBQKBNR, i.e. the regular start.
+    if g.board().board_fen() == chess.STARTING_BOARD_FEN:
+        count.skipped_startpos += 1
+        return None
     fens, res = extract_fens_from_game(g)
     return data_from_fen_res_set(fens, res)
 
