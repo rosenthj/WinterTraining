@@ -113,6 +113,11 @@ def parse_args():
     parser.add_argument('--clip-grad-norm', type=float, default=None,
                         help="Clip the total gradient norm to this value each step (safety net "
                              "against runaway gradients). Off by default.")
+    parser.add_argument('--ce-weight', type=float, default=0.04,
+                        help="Weight of the cross-entropy term in the optimized loss "
+                             "(total = reg + ce_weight * ce). Default 0.04 (historical value). "
+                             "Raise it to put more pressure on full W/D/L calibration (e.g. draws), "
+                             "which the regression term is blind to.")
     parser.add_argument('--epochs-per-step', type=int, default=2)
     parser.add_argument('--log-freq', type=int, default=100000)
     parser.add_argument('--device', type=int, default=0, help="CUDA device index")
@@ -241,7 +246,7 @@ def main():
                            eps=args.eps, betas=betas, clip_grad_norm=args.clip_grad_norm,
                            normloss_factor=args.normloss_factor, pnm=not args.no_pnm,
                            lookahead_k=args.lookahead_k, lookahead_alpha=args.lookahead_alpha,
-                           reg_weights_only=args.reg_weights_only)
+                           reg_weights_only=args.reg_weights_only, ce_weight=args.ce_weight)
     finally:
         if writer is not None:
             writer.close()

@@ -197,7 +197,12 @@ Loading helpers in `loader.py`:
   `ScatterLoader`, which densifies each one-hot batch directly on the training device (only the
   active column indices cross to the GPU, not full 772-wide dense rows).
 
-Training (`train.py`) optimizes a combined WDL MSE + cross-entropy loss. It saves a PyTorch
+Training (`train.py`) optimizes a combined loss `total = reg + ce_weight · ce`, where `reg` is
+the WDL regression term (MSE on the win-minus-loss probability) and `ce` is the W/D/L
+cross-entropy. `--ce-weight` (default `0.04`, the historical value) sets the cross-entropy
+weight: the regression term is blind to the draw axis (moving probability symmetrically between
+win and loss leaves the win-minus-loss margin unchanged), so raising `--ce-weight` puts more
+pressure on full W/D/L calibration — watch its effect on `val/wasserstein`. It saves a PyTorch
 checkpoint (`.pt`) for the always-latest `{name}_tmp` and for every per-epoch snapshot
 `{name}_ep{N}`. The Winter-readable serialized weights (`.bin`, a raw little-endian buffer via
 `model.serialize`) are written **only for `{name}_tmp.bin`** — the most up-to-date model, kept
@@ -230,6 +235,13 @@ forward and have no effect on training:
 
 - `val/mse`, `val/l1`, `val/accuracy` — WDL regression losses and the fraction of positions
   whose argmax W/D/L class matches the result (random baseline ≈ 0.333).
+- `val/wasserstein` — Wasserstein-1 (earth-mover) distance between the predicted W/D/L
+  distribution and the actual outcome, on the expected-score axis (W = 1.0, draw = 0.5,
+  L = 0.0). Since the target is a single outcome this is just `E_p|score − true_score|`.
+  Unlike `val/mse`/`val/l1`, which only see the win-minus-loss margin and are **blind to the
+  draw axis**, this is sensitive to where the *draw* probability mass sits, so it reflects W/D/L
+  (especially draw) calibration. It's a pure validation diagnostic, independent of `--ce-weight`,
+  so it stays comparable across runs with different loss weightings.
 - `act/{conv,fc}_frac_zero`, `act/{conv,fc}_frac_max` — *per-element* fraction of clipped-ReLU
   activations pinned at 0 or at the max (8). A saturation/sparsity signal, **not** a dead-neuron
   count: `conv_frac_zero` is dominated by the piece-presence mask (empty squares are structurally

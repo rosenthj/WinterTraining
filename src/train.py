@@ -14,20 +14,21 @@ def loss_f(pred, target, base_loss=F.mse_loss):
     return base_loss(pred[:, 0] - pred[:, 2], 1.0 - target)
 
 
-def loss_components(pred_logit, target, base_loss=F.mse_loss):
+def loss_components(pred_logit, target, base_loss=F.mse_loss, ce_weight=0.04):
     """Return ``(total, reg, ce)``: the optimized loss and its two components.
 
     ``reg`` is the WDL regression term (``base_loss`` on the win-minus-loss probability),
-    ``ce`` is the cross-entropy term, and ``total = reg + 0.04 * ce`` is what is optimized.
+    ``ce`` is the cross-entropy term, and ``total = reg + ce_weight * ce`` is what is
+    optimized. ``ce_weight`` defaults to 0.04 (the historical value).
     """
     pred = F.softmax(pred_logit, dim=-1)
     reg = loss_f(pred, target, base_loss)
     ce = F.cross_entropy(pred_logit, target)
-    return reg + 0.04 * ce, reg, ce
+    return reg + ce_weight * ce, reg, ce
 
 
-def loss_combined(pred_logit, target, base_loss=F.mse_loss):
-    return loss_components(pred_logit, target, base_loss)[0]
+def loss_combined(pred_logit, target, base_loss=F.mse_loss, ce_weight=0.04):
+    return loss_components(pred_logit, target, base_loss, ce_weight)[0]
 
 
 def randomize_piece_positions(x, randomization):
@@ -80,12 +81,15 @@ def _activation_stats_dict(elem, agg, piece_sum, pos_count, max_val, eps):
     return stats
 
 
-def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=False, activation_stats=False):
-    """Evaluate on ``test_loader`` in one pass. Optionally also returns argmax W/D/L accuracy
-    and a dict of activation-health stats (see ``_activation_stats_dict``), all computed in the
-    same forward pass via an activation hook -- so the extra metrics cost no extra forward.
+def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=False, activation_stats=False,
+         return_wasserstein=False):
+    """Evaluate on ``test_loader`` in one pass. Optionally also returns argmax W/D/L accuracy,
+    the Wasserstein-1 distance, and a dict of activation-health stats (see
+    ``_activation_stats_dict``), all computed in the same forward pass via an activation hook --
+    so the extra metrics cost no extra forward.
 
-    Returns ``losses`` alone, or a tuple appending accuracy and/or the stats dict, in that order.
+    Returns ``losses`` alone, or a tuple appending the requested extras in the order
+    accuracy, wasserstein, activation_stats.
     """
     if not isinstance(base_loss, list):
         base_loss = [base_loss]
@@ -95,6 +99,13 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=Fal
     count = 0
     correct = 0
     n = 0
+    w1_sum = 0.0
+    # W/D/L outcomes live on the expected-score axis (White win 1.0, draw 0.5, Black win 0.0).
+    # The target is a single outcome (a point mass), so the Wasserstein-1 distance from the
+    # predicted distribution to it is just E_p|score - true_score|. Unlike the mse/l1 metrics
+    # -- which only see the win-minus-loss margin -- this is sensitive to where the *draw*
+    # mass sits, so it reflects draw calibration.
+    w1_scores = torch.tensor([1.0, 0.5, 0.0], device=config.device)
 
     # Optional activation-health accumulation, gathered during this same pass via a hook.
     act = getattr(model, "activation", None)
@@ -135,6 +146,10 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=Fal
             for i in range(len(base_loss)):
                 loss = loss_f(output, target, base_loss=base_loss[i])
                 loss_sum[i] += loss.item()
+            if return_wasserstein:
+                true_score = 1.0 - 0.5 * target.to(w1_scores.dtype)  # class 0/1/2 -> 1.0/0.5/0.0
+                dist = (w1_scores.unsqueeze(0) - true_score.unsqueeze(1)).abs()  # (B, 3)
+                w1_sum += (output * dist).sum(dim=1).mean().item()
             if return_accuracy:
                 # output is the softmax over (white-win, draw, black-win); the target is the
                 # result class, so argmax == target is a correct W/D/L call.
@@ -146,11 +161,13 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=Fal
     model.train(training)
 
     losses = loss_sum / count
-    if not (return_accuracy or activation_stats):
+    if not (return_accuracy or return_wasserstein or activation_stats):
         return losses
     result = [losses]
     if return_accuracy:
         result.append(correct / n if n else 0.0)
+    if return_wasserstein:
+        result.append(w1_sum / count if count else 0.0)
     if activation_stats:
         result.append(_activation_stats_dict(elem, agg, piece_sum, pos_count, max_val, eps))
     return tuple(result)
@@ -200,7 +217,8 @@ def _grad_norm(model):
 
 
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
-                test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None):
+                test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None,
+                ce_weight=0.04):
     model.train()
     # Running sums of [total, reg, ce] kept on-device so we only synchronise (.item()) once
     # per log_freq batches instead of every batch -- cheaper than the previous per-batch
@@ -233,14 +251,17 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
                f"Total:{total_avg:.6f}")
         val_losses = None
         val_acc = None
+        val_w1 = None
         act_stats = None
         if include_val and test_loader is not None:
             if config.rec is not None and config.rec > 1:
                 msg += ", " + gen_validation_string(model, test_loader, rec=1)
-            # One validation pass yields losses, accuracy and the activation-health stats.
-            val_losses, val_acc, act_stats = test(model, test_loader, base_loss=[F.mse_loss, F.l1_loss],
-                                                  return_accuracy=True, activation_stats=True)
-            msg += f", Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}, Val acc:{val_acc:.4f}"
+            # One validation pass yields losses, accuracy, Wasserstein and activation-health stats.
+            val_losses, val_acc, val_w1, act_stats = test(model, test_loader, base_loss=[F.mse_loss, F.l1_loss],
+                                                          return_accuracy=True, return_wasserstein=True,
+                                                          activation_stats=True)
+            msg += (f", Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}, "
+                    f"Val w1:{val_w1:.6f}, Val acc:{val_acc:.4f}")
         log(msg)
         if writer is not None:
             writer.add_scalar("train/loss", recent[0], global_step)
@@ -258,6 +279,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             if val_losses is not None:
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
+                writer.add_scalar("val/wasserstein", val_w1, global_step)
                 writer.add_scalar("val/accuracy", val_acc, global_step)
                 for tag, frac in act_stats.items():
                     writer.add_scalar(tag, frac, global_step)
@@ -277,7 +299,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             output = model(data.type(torch.float32), activate=False)
         else:
             output = model(data.type(torch.float32), activate=False, rec=torch.randint(config.rec, (1,)).item())
-        total, reg, ce = loss_components(output, target, base_loss=base_loss)
+        total, reg, ce = loss_components(output, target, base_loss=base_loss, ce_weight=ce_weight)
         total.backward()
         if clip_grad_norm:
             # clip_grad_norm_ returns the total norm *before* clipping (kept on-device; only
@@ -452,7 +474,7 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
                        weight_decay=0.0, persistent_optimizer=False, eps=None, betas=None,
                        clip_grad_norm=None, normloss_factor=1e-4, pnm=True, lookahead_k=5,
-                       lookahead_alpha=0.5, reg_weights_only=False):
+                       lookahead_alpha=0.5, reg_weights_only=False, ce_weight=0.04):
     """Train with a decaying LR schedule.
 
     Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
@@ -542,18 +564,21 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         # train/lr curve reads as a step function instead of an interpolated ramp.
         _, global_step = train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
                                      test_loader=val_loader, name=config.name, writer=writer,
-                                     global_step=global_step, lr=lr, clip_grad_norm=clip_grad_norm)
+                                     global_step=global_step, lr=lr, clip_grad_norm=clip_grad_norm,
+                                     ce_weight=ce_weight)
         epoch += 1
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
         save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)
         if val_loader is not None:
-            val_losses, val_acc, act_stats = test(model, val_loader, base_loss=[F.mse_loss, F.l1_loss],
-                                                  return_accuracy=True, activation_stats=True)
+            val_losses, val_acc, val_w1, act_stats = test(model, val_loader, base_loss=[F.mse_loss, F.l1_loss],
+                                                          return_accuracy=True, return_wasserstein=True,
+                                                          activation_stats=True)
             log(f"Finished Epoch {epoch}. Val mse:{val_losses[0]:.6f}, Val l1:{val_losses[1]:.6f}, "
-                f"Val acc:{val_acc:.4f}")
+                f"Val w1:{val_w1:.6f}, Val acc:{val_acc:.4f}")
             if writer is not None:
                 writer.add_scalar("val/mse", val_losses[0], global_step)
                 writer.add_scalar("val/l1", val_losses[1], global_step)
+                writer.add_scalar("val/wasserstein", val_w1, global_step)
                 writer.add_scalar("val/accuracy", val_acc, global_step)
                 for tag, frac in act_stats.items():
                     writer.add_scalar(tag, frac, global_step)
