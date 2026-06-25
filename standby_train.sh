@@ -2,7 +2,7 @@
 #SBATCH -A antoniob
 #SBATCH -q standby
 #SBATCH --partition=a100-80gb
-#SBATCH --mem=16g
+#SBATCH --mem=64g
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=4
