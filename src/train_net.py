@@ -115,9 +115,16 @@ def parse_args():
                              "against runaway gradients). Off by default.")
     parser.add_argument('--ce-weight', type=float, default=0.04,
                         help="Weight of the cross-entropy term in the optimized loss "
-                             "(total = reg + ce_weight * ce). Default 0.04 (historical value). "
-                             "Raise it to put more pressure on full W/D/L calibration (e.g. draws), "
-                             "which the regression term is blind to.")
+                             "(total = reg + ce_weight*ce + draw_weight*draw). Default 0.04 "
+                             "(historical value). CE is a log-barrier term: it guards the tails "
+                             "(punishes near-zero probability on the realized outcome).")
+    parser.add_argument('--draw-weight', type=float, default=0.0,
+                        help="Weight of the draw-MSE term (MSE of the draw probability vs the "
+                             "draw indicator). Default 0 (off). Covers the draw axis the "
+                             "regression term is blind to, with a bounded quadratic penalty; "
+                             "reg + 3*draw is the multiclass Brier score, so 3 reproduces Brier "
+                             "while smaller values keep the eval axis dominant. Set --ce-weight 0 "
+                             "to use draw-MSE instead of CE, or both for a combined loss.")
     parser.add_argument('--epochs-per-step', type=int, default=2)
     parser.add_argument('--log-freq', type=int, default=100000)
     parser.add_argument('--device', type=int, default=0, help="CUDA device index")
@@ -246,7 +253,8 @@ def main():
                            eps=args.eps, betas=betas, clip_grad_norm=args.clip_grad_norm,
                            normloss_factor=args.normloss_factor, pnm=not args.no_pnm,
                            lookahead_k=args.lookahead_k, lookahead_alpha=args.lookahead_alpha,
-                           reg_weights_only=args.reg_weights_only, ce_weight=args.ce_weight)
+                           reg_weights_only=args.reg_weights_only, ce_weight=args.ce_weight,
+                           draw_weight=args.draw_weight)
     finally:
         if writer is not None:
             writer.close()

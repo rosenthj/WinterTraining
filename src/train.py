@@ -14,21 +14,33 @@ def loss_f(pred, target, base_loss=F.mse_loss):
     return base_loss(pred[:, 0] - pred[:, 2], 1.0 - target)
 
 
-def loss_components(pred_logit, target, base_loss=F.mse_loss, ce_weight=0.04):
-    """Return ``(total, reg, ce)``: the optimized loss and its two components.
+def loss_components(pred_logit, target, base_loss=F.mse_loss, ce_weight=0.04, draw_weight=0.0):
+    """Return ``(total, reg, ce, draw)``: the optimized loss and its three components.
 
-    ``reg`` is the WDL regression term (``base_loss`` on the win-minus-loss probability),
-    ``ce`` is the cross-entropy term, and ``total = reg + ce_weight * ce`` is what is
-    optimized. ``ce_weight`` defaults to 0.04 (the historical value).
+    - ``reg``  -- WDL regression term: ``base_loss`` on the win-minus-loss probability. This is
+      the eval axis (it drives playing strength) but it is *blind to draws* -- moving probability
+      symmetrically between win and loss leaves the win-minus-loss margin unchanged.
+    - ``ce``   -- categorical cross-entropy over W/D/L (a log-barrier term: sensitive to the
+      *tails*, i.e. it punishes assigning near-zero probability to the realised outcome).
+    - ``draw`` -- MSE of the draw probability against the draw indicator. This covers exactly the
+      axis ``reg`` is blind to, with a bounded quadratic penalty. ``reg + 3*draw`` reproduces the
+      multiclass Brier score (up to an overall scale), so ``draw_weight=3`` is "Brier"; smaller
+      values keep the eval axis dominant.
+
+    ``total = reg + ce_weight*ce + draw_weight*draw`` is what is optimized. The historical default
+    (``ce_weight=0.04``, ``draw_weight=0``) is unchanged. ``ce`` and ``draw`` are always computed
+    (both cheap) so they can be logged as diagnostics even when their weight is 0.
     """
     pred = F.softmax(pred_logit, dim=-1)
     reg = loss_f(pred, target, base_loss)
     ce = F.cross_entropy(pred_logit, target)
-    return reg + ce_weight * ce, reg, ce
+    draw = F.mse_loss(pred[:, 1], (target == 1).to(pred.dtype))  # p_draw vs draw indicator
+    total = reg + ce_weight * ce + draw_weight * draw
+    return total, reg, ce, draw
 
 
-def loss_combined(pred_logit, target, base_loss=F.mse_loss, ce_weight=0.04):
-    return loss_components(pred_logit, target, base_loss, ce_weight)[0]
+def loss_combined(pred_logit, target, base_loss=F.mse_loss, ce_weight=0.04, draw_weight=0.0):
+    return loss_components(pred_logit, target, base_loss, ce_weight, draw_weight)[0]
 
 
 def randomize_piece_positions(x, randomization):
@@ -218,13 +230,13 @@ def _grad_norm(model):
 
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
                 test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None,
-                ce_weight=0.04):
+                ce_weight=0.04, draw_weight=0.0):
     model.train()
-    # Running sums of [total, reg, ce] kept on-device so we only synchronise (.item()) once
+    # Running sums of [total, reg, ce, draw] kept on-device so we only synchronise (.item()) once
     # per log_freq batches instead of every batch -- cheaper than the previous per-batch
     # loss.item() while still exposing the loss components.
-    epoch_sums = torch.zeros(3, device=config.device)
-    recent_sums = torch.zeros(3, device=config.device)
+    epoch_sums = torch.zeros(4, device=config.device)
+    recent_sums = torch.zeros(4, device=config.device)
     count = 0
     recent_count = 0
     recent_positions = 0
@@ -247,8 +259,8 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         dt = time.perf_counter() - recent_t0
         recent = (recent_sums / recent_count).tolist()  # single host sync
         total_avg = (epoch_sums[0] / count).item()
-        msg = (f"Batch {count} Recent:{recent[0]:.6f} (reg {recent[1]:.6f}, ce {recent[2]:.6f}), "
-               f"Total:{total_avg:.6f}")
+        msg = (f"Batch {count} Recent:{recent[0]:.6f} (reg {recent[1]:.6f}, ce {recent[2]:.6f}, "
+               f"draw {recent[3]:.6f}), Total:{total_avg:.6f}")
         val_losses = None
         val_acc = None
         val_w1 = None
@@ -267,6 +279,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             writer.add_scalar("train/loss", recent[0], global_step)
             writer.add_scalar("train/loss_reg", recent[1], global_step)
             writer.add_scalar("train/loss_ce", recent[2], global_step)
+            writer.add_scalar("train/loss_draw", recent[3], global_step)
             if lr is not None:
                 writer.add_scalar("train/lr", lr, global_step)
             # Prefer the pre-clip norm captured during the step; fall back to a direct
@@ -285,7 +298,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
                     writer.add_scalar(tag, frac, global_step)
         if name is not None:
             save(model, name=name)
-        recent_sums = torch.zeros(3, device=config.device)
+        recent_sums = torch.zeros(4, device=config.device)
         recent_count = 0
         recent_positions = 0
         recent_t0 = time.perf_counter()
@@ -299,7 +312,8 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
             output = model(data.type(torch.float32), activate=False)
         else:
             output = model(data.type(torch.float32), activate=False, rec=torch.randint(config.rec, (1,)).item())
-        total, reg, ce = loss_components(output, target, base_loss=base_loss, ce_weight=ce_weight)
+        total, reg, ce, draw = loss_components(output, target, base_loss=base_loss,
+                                               ce_weight=ce_weight, draw_weight=draw_weight)
         total.backward()
         if clip_grad_norm:
             # clip_grad_norm_ returns the total norm *before* clipping (kept on-device; only
@@ -308,7 +322,7 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         optimizer.step()
 
         with torch.no_grad():
-            batch_stats = torch.stack([total.detach(), reg.detach(), ce.detach()])
+            batch_stats = torch.stack([total.detach(), reg.detach(), ce.detach(), draw.detach()])
             epoch_sums += batch_stats
             recent_sums += batch_stats
         count += 1
@@ -474,7 +488,7 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
                        weight_decay=0.0, persistent_optimizer=False, eps=None, betas=None,
                        clip_grad_norm=None, normloss_factor=1e-4, pnm=True, lookahead_k=5,
-                       lookahead_alpha=0.5, reg_weights_only=False, ce_weight=0.04):
+                       lookahead_alpha=0.5, reg_weights_only=False, ce_weight=0.04, draw_weight=0.0):
     """Train with a decaying LR schedule.
 
     Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
@@ -565,7 +579,7 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         _, global_step = train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
                                      test_loader=val_loader, name=config.name, writer=writer,
                                      global_step=global_step, lr=lr, clip_grad_norm=clip_grad_norm,
-                                     ce_weight=ce_weight)
+                                     ce_weight=ce_weight, draw_weight=draw_weight)
         epoch += 1
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
         save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)
