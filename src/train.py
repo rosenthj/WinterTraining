@@ -409,6 +409,46 @@ def latest_checkpoint(name):
     return max(paths, key=os.path.getmtime) if paths else None
 
 
+def load_partial_state_dict(model, state_dict, verbose=True):
+    """Seed ``model`` from ``state_dict``, copying the overlapping slice of every shared
+    parameter and leaving the rest at its fresh initialization.
+
+    This is the generic ("grow the net") replacement for the old, ``Net``-specific
+    ``load_partial_model_weights``: for each parameter present in both the checkpoint and
+    the target model, it copies ``src[:min(d0), :min(d1), ...]`` into the target, so a
+    checkpoint trained at a smaller ``--d`` / ``--fd`` seeds the leading rows/columns of a
+    larger model and the newly added units start from their normal random init. Parameters
+    absent from the checkpoint (e.g. a whole new layer) are left untouched.
+
+    Returns (copied, grown, skipped) parameter-name lists for logging.
+    """
+    tgt = model.state_dict()
+    copied, grown, skipped = [], [], []
+    with torch.no_grad():
+        for name, src in state_dict.items():
+            if name not in tgt:
+                skipped.append(name)
+                continue
+            dst = tgt[name]
+            if src.shape == dst.shape:
+                dst.copy_(src)
+                copied.append(name)
+            elif src.dim() == dst.dim() and all(s <= d for s, d in zip(src.shape, dst.shape)):
+                # Copy the overlapping leading block; the rest keeps its fresh init.
+                sl = tuple(slice(0, s) for s in src.shape)
+                dst[sl].copy_(src)
+                grown.append(name)
+            else:
+                # Shrinking or a rank change we can't safely align -- leave it initialized.
+                skipped.append(name)
+    model.load_state_dict(tgt)
+    if verbose:
+        print(f"Partial load: {len(copied)} copied, {len(grown)} grown "
+              f"{grown if grown else ''}, {len(skipped)} skipped "
+              f"{skipped if skipped else ''}")
+    return copied, grown, skipped
+
+
 def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0, eps=None, betas=None,
                    normloss_factor=1e-4, pnm=True, lookahead_k=5, lookahead_alpha=0.5):
     """Build the optimizer selected on the CLI. SGD+momentum is the historical default.

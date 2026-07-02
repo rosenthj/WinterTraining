@@ -197,12 +197,25 @@ Loading helpers in `loader.py`:
   `ScatterLoader`, which densifies each one-hot batch directly on the training device (only the
   active column indices cross to the GPU, not full 772-wide dense rows).
 
-Training (`train.py`) optimizes a combined loss `total = reg + ce_weight · ce`, where `reg` is
-the WDL regression term (MSE on the win-minus-loss probability) and `ce` is the W/D/L
-cross-entropy. `--ce-weight` (default `0.04`, the historical value) sets the cross-entropy
-weight: the regression term is blind to the draw axis (moving probability symmetrically between
-win and loss leaves the win-minus-loss margin unchanged), so raising `--ce-weight` puts more
-pressure on full W/D/L calibration — watch its effect on `val/wasserstein`. It saves a PyTorch
+Training (`train.py`) optimizes a combined loss `total = reg + ce_weight · ce + draw_weight ·
+draw`, where `reg` is the WDL regression term (MSE on the win-minus-loss probability), `ce` is
+the W/D/L cross-entropy, and `draw` is the draw-axis MSE (`MSE(p_draw, draw_indicator)`).
+`--ce-weight` (default `0.04`, the historical value) sets the cross-entropy weight: the
+regression term is blind to the draw axis (moving probability symmetrically between win and loss
+leaves the win-minus-loss margin unchanged), so raising `--ce-weight` puts more pressure on full
+W/D/L calibration — watch its effect on `val/wasserstein`.
+
+`--draw-weight` (default `0`, off) adds the bounded draw-axis MSE term as an alternative draw
+calibrator to the log-barrier cross-entropy. It is on the same squared-error scale as `reg`, and
+`reg + 3 · draw` equals twice the full multiclass Brier score, so **`--draw-weight 3` (with
+`--ce-weight 0`) reproduces the Brier score** — draw calibration without a separate `--loss`
+enum. Both `ce` and `draw` are proper scoring rules for the draw axis and are asymptotically
+redundant, so the usual setup is `reg` plus *one* of them; the narrow reason to combine all three
+is `draw` to calibrate the bulk draw rate plus a small `ce` as a tail/overconfidence guard, since
+they penalize the draw region differently. The `draw` term is always computed and logged as
+`train/loss_draw` even when its weight is 0, so it is a free diagnostic; when turning up
+`--draw-weight`, watch `train/loss_reg` — since the two share the same scale, a large draw weight
+pulls capacity off the eval axis. It saves a PyTorch
 checkpoint (`.pt`) for the always-latest `{name}_tmp` and for every per-epoch snapshot
 `{name}_ep{N}`. The Winter-readable serialized weights (`.bin`, a raw little-endian buffer via
 `model.serialize`) are written **only for `{name}_tmp.bin`** — the most up-to-date model, kept
@@ -223,7 +236,8 @@ Scalars are logged at each `--log-freq` interval and once at every epoch end (so
 is negligible — per-batch loss components are summed on-device and synced only when logging):
 
 - `train/loss` (optimized total), `train/loss_reg` (WDL regression term), `train/loss_ce`
-  (cross-entropy term)
+  (cross-entropy term), `train/loss_draw` (draw-axis MSE term; logged even when
+  `--draw-weight 0`, as a free calibration diagnostic)
 - `train/lr` — logged densely so it renders as a step function rather than a linearly
   interpolated ramp
 - `train/grad_norm` — total gradient L2 norm (a per-log-point snapshot; watch for spikes /
@@ -300,6 +314,28 @@ Watch `val/mse` (should stay near the deployed net's **0.3075**) and `val/accura
 Note these are *proxies*: true playing strength must be confirmed by loading the resulting
 `.bin` into Winter and running an engine match against the original. Lower `--init-lr` keeps the
 weights closer to the base (more faithful retraining); higher LR explores further.
+
+#### Growing the net (`--init-partial`)
+
+By default `--init-from` (and `--load`) require the checkpoint's architecture to match exactly.
+Adding `--init-partial` relaxes this so a **larger** model can be seeded from a **smaller**
+checkpoint — useful when a bigger dataset justifies more capacity. For every parameter shared
+between the checkpoint and the new model it copies the overlapping leading block
+(`src[:d0, :d1, …]`); the newly added units keep their normal random init, and any layer that is
+missing from the checkpoint or can't be aligned (shrinking / rank change) is left untouched. The
+load prints a `copied / grown / skipped` summary per parameter. Example — grow the deployed net
+to `d=24, fd=96`:
+
+```bash
+python train_net.py --name winter_big --d 24 --fd 96 \
+    --init-from ../models/rn16HD64b.pt --init-partial \
+    --datasets all --exclude 0 vEnd --init-lr 0.008
+```
+
+Treat a grown run as a fresh schedule (start from a normal `--init-lr`): the optimizer state
+does not carry over and the added units need to train up. `--auto-resume` never partial-loads —
+once the run has its own checkpoints they continue at the grown size as usual, so `--init-partial`
+composes with the segment chain exactly like `--init-from`.
 
 ## Running on a batch cluster (SLURM)
 

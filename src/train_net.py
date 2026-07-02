@@ -9,7 +9,8 @@ import config
 from loader import (discover_dataset_tags, select_dataset_tags, load_from_multiple,
                     load_features_results, make_scatter_loader)
 from model import NetRel, NetRelH, NetRelHD
-from train import scheduled_lr_train, latest_checkpoint, load_training_state
+from train import (scheduled_lr_train, latest_checkpoint, load_training_state,
+                   load_partial_state_dict)
 
 
 # Model name -> (class, accepts_fd). Add new architectures here to expose them on the CLI.
@@ -68,6 +69,12 @@ def parse_args():
                              "once the run has its own checkpoints, so it composes with "
                              "submit_chain.sh (segment 1 seeds from the base, rest resume). The "
                              "architecture flags must match the checkpoint.")
+    parser.add_argument('--init-partial', action='store_true', default=False,
+                        help="Grow the net: allow --init-from (or --load) to seed a LARGER "
+                             "model from a smaller checkpoint. Copies the overlapping slice of "
+                             "each shared parameter; newly added units keep their random init "
+                             "and mismatched/missing layers are left untouched. Use when "
+                             "bumping --d / --fd above the checkpoint's size.")
     parser.add_argument('--auto-resume', action='store_true', default=False,
                         help="Resume run '--name': load newest checkpoint + LR-schedule/optimizer "
                              "state from ../models/<name>/. Safe on a fresh run (nothing to resume).")
@@ -214,23 +221,32 @@ def main():
     # --init-from is thus superseded once a run has its own checkpoints, so it composes with
     # the segment chain: segment 1 seeds from the base model, later segments resume normally.
     # --load is a plain one-off weight load (no schedule resume) for non-resume use.
+    def seed_from(path):
+        # Partial (grow-the-net) or strict load, per --init-partial.
+        state = torch.load(path, map_location="cpu")
+        if args.init_partial:
+            load_partial_state_dict(model, state)
+        else:
+            model.load_state_dict(state)
+
     resume_state = None
     if args.auto_resume:
         ckpt = latest_checkpoint(args.name)
         if ckpt:
+            # A resumed run continues at its own size; never partial-load a checkpoint.
             model.load_state_dict(torch.load(ckpt, map_location="cpu"))
             resume_state = load_training_state(args.name)
             print(f"Resuming run '{args.name}': loaded weights from {ckpt}")
         elif args.init_from:
-            model.load_state_dict(torch.load(args.init_from, map_location="cpu"))
+            seed_from(args.init_from)
             print(f"Fine-tuning: initialized run '{args.name}' from {args.init_from}")
         else:
             print(f"Starting run '{args.name}' fresh.")
     elif args.init_from:
-        model.load_state_dict(torch.load(args.init_from, map_location="cpu"))
+        seed_from(args.init_from)
         print(f"Fine-tuning: initialized from {args.init_from}")
     elif args.load:
-        model.load_state_dict(torch.load(args.load, map_location="cpu"))
+        seed_from(args.load)
         print(f"Loaded weights from {args.load}")
     model.to(config.device)
 
