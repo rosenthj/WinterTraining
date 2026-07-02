@@ -409,6 +409,26 @@ def latest_checkpoint(name):
     return max(paths, key=os.path.getmtime) if paths else None
 
 
+def _copy_overlap(dst, src, blocks=None):
+    """Copy ``src`` into the overlapping leading region of ``dst`` (same rank, ``src`` no
+    larger along any dim). If ``blocks`` is given as ``(dim, n)``, both tensors are split
+    into ``n`` equal chunks along ``dim`` first and the leading block is copied per chunk --
+    this keeps block-concatenated axes (e.g. NetRelHD's ``[real | mirror]`` channel axis)
+    aligned when a shared dimension grows, instead of copying one contiguous prefix that
+    would slice across the block boundary.
+    """
+    if blocks is None:
+        sl = tuple(slice(0, s) for s in src.shape)
+        dst[sl].copy_(src)
+        return
+    dim, n = blocks
+    assert src.shape[dim] % n == 0 and dst.shape[dim] % n == 0, \
+        f"block dim {dim} not divisible by {n}"
+    for s_chunk, d_chunk in zip(src.chunk(n, dim=dim), dst.chunk(n, dim=dim)):
+        sl = tuple(slice(0, s) for s in s_chunk.shape)
+        d_chunk[sl].copy_(s_chunk)
+
+
 def load_partial_state_dict(model, state_dict, verbose=True):
     """Seed ``model`` from ``state_dict``, copying the overlapping slice of every shared
     parameter and leaving the rest at its fresh initialization.
@@ -420,9 +440,14 @@ def load_partial_state_dict(model, state_dict, verbose=True):
     larger model and the newly added units start from their normal random init. Parameters
     absent from the checkpoint (e.g. a whole new layer) are left untouched.
 
+    Models with block-concatenated axes (e.g. NetRelHD, whose ``out``/``fout`` inputs are a
+    ``[real | mirror]`` concatenation) can expose ``partial_load_blocks()`` -> ``{param_name:
+    (dim, n_blocks)}`` so those axes are grown block-wise rather than as one contiguous prefix.
+
     Returns (copied, grown, skipped) parameter-name lists for logging.
     """
     tgt = model.state_dict()
+    block_spec = getattr(model, "partial_load_blocks", lambda: {})()
     copied, grown, skipped = [], [], []
     with torch.no_grad():
         for name, src in state_dict.items():
@@ -435,8 +460,7 @@ def load_partial_state_dict(model, state_dict, verbose=True):
                 copied.append(name)
             elif src.dim() == dst.dim() and all(s <= d for s, d in zip(src.shape, dst.shape)):
                 # Copy the overlapping leading block; the rest keeps its fresh init.
-                sl = tuple(slice(0, s) for s in src.shape)
-                dst[sl].copy_(src)
+                _copy_overlap(dst, src, block_spec.get(name))
                 grown.append(name)
             else:
                 # Shrinking or a rank change we can't safely align -- leave it initialized.

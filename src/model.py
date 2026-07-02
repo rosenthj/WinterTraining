@@ -63,6 +63,11 @@ class NetRel(nn.Module):
         # out, 3 8x8 conv filters
         self.out = nn.Conv2d(12 * d, 3, 8, padding=0)
 
+    def partial_load_blocks(self):
+        # Conv output channels are grouped per piece-plane (d each), so growing d must be
+        # seeded block-wise: 12 plane-blocks on c1/b1 (dim 0) and on out's input (dim 1).
+        return {"c1.weight": (0, 12), "b1": (0, 12), "out.weight": (1, 12)}
+
     def forward(self, x_in, activate=True):
         x = x_in[:, :768].view(-1, 12, 8, 8)
         mask = torch.repeat_interleave(x, self.d, dim=1)
@@ -181,6 +186,12 @@ class NetRelH(nn.Module):
         self.f_dim = num_inputs
         self.f1 = nn.Linear(self.f_dim, fd)
         self.fout = nn.Linear(fd, 3, bias=False)
+
+    def partial_load_blocks(self):
+        # Conv output channels grouped per piece-plane (d each): 12 plane-blocks on c1/b1
+        # (dim 0) and on out's input (dim 1). out/fout are not mirror-doubled here, and f1's
+        # fd units are not plane-grouped, so the full-layer path grows as a plain prefix.
+        return {"c1.weight": (0, 12), "b1": (0, 12), "out.weight": (1, 12)}
 
     def forward(self, x_in, activate=True):
         x = x_in[:, :768].view(-1, 12, 8, 8)
@@ -481,6 +492,22 @@ class NetRelHD(nn.Module):
         self.f_dim = num_inputs
         self.f1 = nn.Linear(self.f_dim, fd)
         self.fout = nn.Linear(2 * fd, 3, bias=False)
+
+    def partial_load_blocks(self):
+        # Growing d/fd reindexes several concatenated axes, which must be seeded block-wise
+        # rather than as one contiguous prefix (see load_partial_state_dict):
+        #  - the conv output channels are grouped per input piece-plane, d channels each
+        #    (mask = repeat_interleave(x, d)), so c1.weight / b1 are 12 blocks along dim 0;
+        #  - out takes cat([real | mirror]) and each half is those same 12 plane-blocks,
+        #    so out.weight is 12*2 = 24 blocks along its input axis (dim 1);
+        #  - fout takes cat([fx | fxm]); f1's fd units are not plane-grouped, so it is just
+        #    2 blocks (the two mirror halves) along dim 1.
+        return {
+            "c1.weight": (0, 12),
+            "b1": (0, 12),
+            "out.weight": (1, 24),
+            "fout.weight": (1, 2),
+        }
 
     def forward(self, x_in, activate=True):
         x = x_in[:, :768].view(-1, 12, 8, 8)
