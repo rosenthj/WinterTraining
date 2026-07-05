@@ -132,7 +132,27 @@ def parse_args():
                              "reg + 3*draw is the multiclass Brier score, so 3 reproduces Brier "
                              "while smaller values keep the eval axis dominant. Set --ce-weight 0 "
                              "to use draw-MSE instead of CE, or both for a combined loss.")
-    parser.add_argument('--epochs-per-step', type=int, default=2)
+    parser.add_argument('--epochs-per-step', type=int, default=2,
+                        help="step schedule: epochs between each LR *lr_mult drop (ignored for wsd)")
+    parser.add_argument('--schedule', type=str, default="step", choices=["step", "wsd"],
+                        help="LR schedule. 'step' (default): geometric decay init_lr*lr_mult^"
+                             "(epoch//epochs_per_step) until < min_lr (historical; kept for "
+                             "reproducing older runs). 'wsd': Warmup-Stable-Decay over a fixed "
+                             "--total-epochs budget -- linear warmup (--warmup-steps) to peak "
+                             "--init-lr, a long stable phase at the peak, then a half-cosine decay "
+                             "to --min-lr over the final --decay-frac of the run. Uses one "
+                             "persistent optimizer; --lr-mult/--epochs-per-step are ignored.")
+    parser.add_argument('--total-epochs', type=int, default=None,
+                        help="wsd: total training budget in epochs (required for --schedule wsd). "
+                             "Sizes the stable/decay windows; the run stops after this many epochs.")
+    parser.add_argument('--warmup-steps', type=int, default=0,
+                        help="wsd: linear LR warmup length in batches (from ~0 to peak --init-lr). "
+                             "Counts from this run's global_step 0, so a grown/fresh run re-warms "
+                             "at its start while a resumed segment does not. Try a few hundred to a "
+                             "few thousand; especially useful right after growing the net.")
+    parser.add_argument('--decay-frac', type=float, default=0.1,
+                        help="wsd: fraction of the total run spent in the final cosine decay to "
+                             "--min-lr (e.g. 0.1 = last 10%%). The rest (after warmup) is stable.")
     parser.add_argument('--log-freq', type=int, default=100000)
     parser.add_argument('--device', type=int, default=0, help="CUDA device index")
     parser.add_argument('--no-cuda', action='store_true', default=False, help="Force CPU training")
@@ -161,6 +181,10 @@ def make_writer(args):
 
 def main():
     args = parse_args()
+
+    if args.schedule == "wsd" and not (args.total_epochs and args.total_epochs > 0):
+        print("Error: --schedule wsd requires --total-epochs > 0 (the training budget).")
+        return 1
 
     # load_from_multiple concatenates save_dir directly, so ensure a trailing separator.
     args.data_dir = os.path.join(args.data_dir, "")
@@ -270,7 +294,9 @@ def main():
                            normloss_factor=args.normloss_factor, pnm=not args.no_pnm,
                            lookahead_k=args.lookahead_k, lookahead_alpha=args.lookahead_alpha,
                            reg_weights_only=args.reg_weights_only, ce_weight=args.ce_weight,
-                           draw_weight=args.draw_weight)
+                           draw_weight=args.draw_weight, schedule=args.schedule,
+                           total_epochs=args.total_epochs, warmup_steps=args.warmup_steps,
+                           decay_frac=args.decay_frac)
     finally:
         if writer is not None:
             writer.close()

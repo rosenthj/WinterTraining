@@ -1,5 +1,6 @@
 import config
 import glob
+import math
 import numpy as np
 import os
 import time
@@ -230,7 +231,10 @@ def _grad_norm(model):
 
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
                 test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None,
-                ce_weight=0.04, draw_weight=0.0):
+                ce_weight=0.04, draw_weight=0.0, lr_schedule=None):
+    # ``lr_schedule``: optional callable global_step -> lr. When given, the LR is set per batch
+    # from the current global_step (used by the WSD schedule for step-granular warmup/decay);
+    # when None, the fixed ``lr`` set by the caller is used for the whole epoch (legacy behaviour).
     model.train()
     # Running sums of [total, reg, ce, draw] kept on-device so we only synchronise (.item()) once
     # per log_freq batches instead of every batch -- cheaper than the previous per-batch
@@ -305,6 +309,11 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
 
     for (data, target) in train_loader:
         # data = randomize_piece_positions(data, rng_piece_positions)
+        if lr_schedule is not None:
+            # Per-step LR (warmup/stable/decay). Reassigning the local ``lr`` also updates what
+            # flush() logs to train/lr, so the curve follows the schedule at log resolution.
+            lr = lr_schedule(global_step)
+            _set_lr(optimizer, lr)
         data, target = data.to(config.device), target.to(config.device)
         optimizer.zero_grad()
 
@@ -508,6 +517,27 @@ def _set_lr(optimizer, lr):
         group["lr"] = lr
 
 
+def wsd_lr(step, total_steps, peak_lr, min_lr, warmup_steps, decay_steps):
+    """Warmup-Stable-Decay learning rate at global ``step``.
+
+    Three phases over a fixed budget of ``total_steps`` batches:
+      - warmup  (``[0, warmup_steps)``): linear ramp 0 -> ``peak_lr``;
+      - stable  (until the decay window): constant ``peak_lr``;
+      - decay   (last ``decay_steps``): half-cosine ``peak_lr`` -> ``min_lr``.
+    Unlike geometric step decay, the LR is held at its peak through the long stable phase and
+    only annealed at the very end, so training keeps learning (helps rare features, which see
+    few gradient steps) and most of the final loss drop comes from the short decay tail.
+    Being a pure function of ``step`` (which is persisted as ``global_step``), it resumes exactly.
+    """
+    if warmup_steps > 0 and step < warmup_steps:
+        return peak_lr * (step + 1) / warmup_steps
+    decay_start = total_steps - decay_steps
+    if step < decay_start:
+        return peak_lr
+    prog = min(1.0, max(0.0, (step - decay_start) / max(1, decay_steps)))
+    return min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + math.cos(math.pi * prog))
+
+
 def split_regularized_params(model):
     """Split params into (regularized weight matrices, everything else).
 
@@ -552,8 +582,19 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
                        weight_decay=0.0, persistent_optimizer=False, eps=None, betas=None,
                        clip_grad_norm=None, normloss_factor=1e-4, pnm=True, lookahead_k=5,
-                       lookahead_alpha=0.5, reg_weights_only=False, ce_weight=0.04, draw_weight=0.0):
-    """Train with a decaying LR schedule.
+                       lookahead_alpha=0.5, reg_weights_only=False, ce_weight=0.04, draw_weight=0.0,
+                       schedule="step", total_epochs=None, warmup_steps=0, decay_frac=0.1):
+    """Train with a learning-rate schedule.
+
+    ``schedule`` selects the LR shape:
+      - ``"step"`` (default): the historical geometric step decay -- ``lr = init_lr *
+        lr_mult**(epoch // epochs_per_step)``, run until ``lr < min_lr``. Kept unchanged so
+        older runs reproduce exactly.
+      - ``"wsd"``: Warmup-Stable-Decay (``wsd_lr``), a step-granular schedule over a fixed
+        ``total_epochs`` budget: linear warmup over ``warmup_steps`` batches to the peak
+        ``init_lr``, a long stable phase at the peak, then a half-cosine decay to ``min_lr``
+        over the final ``decay_frac`` of the run. Uses one persistent optimizer (continuous
+        momentum). ``lr_mult`` / ``epochs_per_step`` are ignored.
 
     Either pass a fixed ``data_loader``, or pass ``data_loader_fn`` (a callable returning a
     fresh loader) together with ``reload_every`` > 0 to resample the training data every
@@ -561,7 +602,10 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
     (see ``loader.load_from_multiple``'s ``portion``) while still covering all of it over
     time -- this is the memory-bounded streaming used for the full dataset.
     """
-    assert 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
+    assert schedule in ("step", "wsd"), f"Unknown schedule '{schedule}' (expected 'step' or 'wsd')"
+    wsd = schedule == "wsd"
+    assert wsd or 1 > lr_mult > 0, f"Unexpected lr_mult param:{lr_mult}"
+    assert not wsd or (total_epochs and total_epochs > 0), "WSD schedule requires total_epochs > 0"
     assert data_loader is not None or data_loader_fn is not None, "Provide data_loader or data_loader_fn"
     # config.activation_hook = OutputHook()
     # model.activation.register_forward_hook(config.activation_hook)
@@ -582,7 +626,7 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         global_step = resume_state.get("global_step", 0)
         pending_opt_state = resume_state.get("optimizer")
         pending_opt_step = resume_state.get("step")
-        log(f"Resuming schedule at epoch {start_epoch + 1} (step {start_epoch // epochs_per_step})")
+        log(f"Resuming schedule at epoch {start_epoch + 1} (global_step {global_step})")
 
     # The start-position eval is a cheap, interpretable sanity metric: the network's
     # predicted expected score / WDL for the opening position, which should settle near a
@@ -595,43 +639,79 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         except Exception as e:
             log(f"start-position metric unavailable: {e}")
 
+    # WSD sizes its warmup/stable/decay windows in batches, so it needs the per-epoch step
+    # count. Build the first loader up front (in resampling mode) to measure it; the loop
+    # reuses it for the first epoch. total_steps is a pure function of total_epochs and the
+    # (constant) per-epoch step count, so wsd_lr(global_step) resumes exactly.
+    lr_schedule = None
+    if wsd:
+        if data_loader is None:
+            data_loader = data_loader_fn()
+        steps_per_epoch = len(data_loader)
+        total_steps = total_epochs * steps_per_epoch
+        decay_steps = max(1, int(round(decay_frac * total_steps)))
+        peak_lr = init_lr
+        lr_schedule = lambda gs: wsd_lr(gs, total_steps, peak_lr, min_lr, warmup_steps, decay_steps)
+        log(f"WSD schedule: {total_epochs} epochs x {steps_per_epoch} steps = {total_steps} steps "
+            f"(warmup {warmup_steps}, decay {decay_steps}), peak lr {peak_lr:g} -> min {min_lr:g}")
+
     epoch = start_epoch
     optimizer = None
     cur_step = None
     while True:
-        step = epoch // epochs_per_step
-        lr = init_lr * (lr_mult ** step)
-        if lr < min_lr:
-            break
-        # Optimizer handling at each LR-schedule step:
-        #  - default: recreate a fresh optimizer per step (the original behaviour);
-        #  - persistent_optimizer: build it once and span the whole run, just updating the
-        #    learning rate at each step -- this preserves Adam/Lookahead state across LR
-        #    drops, which is how Ranger is meant to be run.
-        if optimizer is None:
-            optimizer = make_optimizer(optimizer_name, _optimizer_params(model, reg_weights_only), lr,
-                                       momentum=momentum, weight_decay=weight_decay, eps=eps, betas=betas,
-                                       normloss_factor=normloss_factor, pnm=pnm,
-                                       lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
-            # On resume restore the saved state: always in persistent mode (one continuous
-            # optimizer), otherwise only when it belongs to this step (a fresh optimizer is
-            # wanted when resuming exactly at a new step boundary).
-            if pending_opt_state is not None and (persistent_optimizer or pending_opt_step == step):
-                optimizer.load_state_dict(pending_opt_state)
-                _move_optimizer_state(optimizer, config.device)
-                _set_lr(optimizer, lr)  # the restored state may carry an older step's lr
-                log(f"Restored optimizer state ({'persistent' if persistent_optimizer else f'step {step}'})")
-            pending_opt_state = None
-            cur_step = step
-            log(f"\nLearning rate is {lr:g} (step {step})")
-        elif step != cur_step:
-            if persistent_optimizer:
-                _set_lr(optimizer, lr)
-            else:
-                optimizer = make_optimizer(optimizer_name, model.parameters(), lr, momentum=momentum,
-                                           weight_decay=weight_decay)
-            cur_step = step
-            log(f"\nLearning rate is {lr:g} (step {step})")
+        if wsd:
+            # Fixed-budget run; the LR is set per batch inside train_epoch from lr_schedule.
+            if epoch >= total_epochs:
+                break
+            step = epoch  # stored for bookkeeping only (WSD is driven by global_step)
+            lr = lr_schedule(global_step)  # epoch-start value for the log line below
+            if optimizer is None:
+                # One continuous optimizer for the whole WSD run (preserves momentum through
+                # the stable->decay transition), so always restore saved state on resume.
+                optimizer = make_optimizer(optimizer_name, _optimizer_params(model, reg_weights_only), lr,
+                                           momentum=momentum, weight_decay=weight_decay, eps=eps, betas=betas,
+                                           normloss_factor=normloss_factor, pnm=pnm,
+                                           lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
+                if pending_opt_state is not None:
+                    optimizer.load_state_dict(pending_opt_state)
+                    _move_optimizer_state(optimizer, config.device)
+                    log("Restored optimizer state (WSD)")
+                pending_opt_state = None
+                log(f"\nWSD peak lr {peak_lr:g}; resuming at global_step {global_step} (epoch {epoch + 1})")
+        else:
+            step = epoch // epochs_per_step
+            lr = init_lr * (lr_mult ** step)
+            if lr < min_lr:
+                break
+            # Optimizer handling at each LR-schedule step:
+            #  - default: recreate a fresh optimizer per step (the original behaviour);
+            #  - persistent_optimizer: build it once and span the whole run, just updating the
+            #    learning rate at each step -- this preserves Adam/Lookahead state across LR
+            #    drops, which is how Ranger is meant to be run.
+            if optimizer is None:
+                optimizer = make_optimizer(optimizer_name, _optimizer_params(model, reg_weights_only), lr,
+                                           momentum=momentum, weight_decay=weight_decay, eps=eps, betas=betas,
+                                           normloss_factor=normloss_factor, pnm=pnm,
+                                           lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
+                # On resume restore the saved state: always in persistent mode (one continuous
+                # optimizer), otherwise only when it belongs to this step (a fresh optimizer is
+                # wanted when resuming exactly at a new step boundary).
+                if pending_opt_state is not None and (persistent_optimizer or pending_opt_step == step):
+                    optimizer.load_state_dict(pending_opt_state)
+                    _move_optimizer_state(optimizer, config.device)
+                    _set_lr(optimizer, lr)  # the restored state may carry an older step's lr
+                    log(f"Restored optimizer state ({'persistent' if persistent_optimizer else f'step {step}'})")
+                pending_opt_state = None
+                cur_step = step
+                log(f"\nLearning rate is {lr:g} (step {step})")
+            elif step != cur_step:
+                if persistent_optimizer:
+                    _set_lr(optimizer, lr)
+                else:
+                    optimizer = make_optimizer(optimizer_name, model.parameters(), lr, momentum=momentum,
+                                               weight_decay=weight_decay)
+                cur_step = step
+                log(f"\nLearning rate is {lr:g} (step {step})")
         # In resampling mode, draw a fresh random subset every reload_every epochs (and on
         # the first epoch of a (re)started run, where data_loader has not been built yet).
         if data_loader_fn is not None and (data_loader is None or epoch % reload_every == 0):
@@ -639,11 +719,12 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
         log(f"Epoch {epoch + 1}--Training on {len(data_loader.dataset)} samples"
             "----------------------------------------------------")
         # lr is logged densely inside train_epoch (at each log point + epoch end) so the
-        # train/lr curve reads as a step function instead of an interpolated ramp.
+        # train/lr curve reads as a step function instead of an interpolated ramp. In WSD mode
+        # lr_schedule overrides it per batch (step-granular warmup/decay).
         _, global_step = train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
                                      test_loader=val_loader, name=config.name, writer=writer,
                                      global_step=global_step, lr=lr, clip_grad_norm=clip_grad_norm,
-                                     ce_weight=ce_weight, draw_weight=draw_weight)
+                                     ce_weight=ce_weight, draw_weight=draw_weight, lr_schedule=lr_schedule)
         epoch += 1
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
         save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)

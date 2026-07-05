@@ -278,19 +278,56 @@ The x-axis (`global_step` = batches seen) is persisted in the run state, so char
 continuous across resumed segments. Pass `--no-tensorboard` to disable; if the `tensorboard`
 package isn't installed, training continues without it. (Install with `pip install tensorboard`.)
 
+### Learning-rate schedule (`--schedule`)
+
+Two LR schedules are available via `--schedule`:
+
+- **`step`** (default) — the historical geometric decay: `lr = init_lr · lr_mult**(epoch //
+  epochs_per_step)`, run until `lr < min_lr`. Kept unchanged so older runs reproduce exactly;
+  `--lr-mult` and `--epochs-per-step` control it.
+- **`wsd`** — **Warmup–Stable–Decay**, the modern default for training on large datasets with
+  SGD. Over a fixed `--total-epochs` budget it (1) linearly **warms up** the LR from ~0 to the
+  peak `--init-lr` over `--warmup-steps` batches, (2) holds it **stable** at the peak through the
+  long middle of the run, then (3) **decays** it with a half-cosine to `--min-lr` over the final
+  `--decay-frac` of the run (default `0.1`). It uses one persistent optimizer so momentum is
+  continuous through the stable→decay transition.
+
+Why WSD here: the long high-LR stable phase keeps the network learning **rare features** (with
+SGD a weight for a rare piece configuration only updates on the few steps that feature is active,
+so decaying the LR early — as geometric step decay does — starves it), while most of the final
+loss drop comes from the short end-decay. Warmup avoids the early large, ill-conditioned-gradient
+instability. Warmup is measured from **this run's** `global_step 0`, so a fresh or **grown** run
+(see `--init-partial` above) automatically re-warms at its start — the right thing after adding
+capacity — while a resumed segment of the same run does not warm up again. WSD is also a natural
+fit for the chained SLURM segments below: the stable phase is a flat LR you can spread across any
+number of ~4h segments, and the decay lands in the final segments. Example:
+
+```bash
+python train_net.py --name rew502_wsd --schedule wsd --total-epochs 60 \
+    --warmup-steps 2000 --decay-frac 0.15 --init-lr 0.016 --min-lr 0.0002 \
+    --datasets all --exclude 0 vEnd --reload-every 1 --portion 0.14 --batch-size 64
+```
+
+`train/lr` in TensorBoard shows the warmup ramp, stable plateau, and cosine tail; `train/loss_reg`
+should keep improving through the stable phase and drop further during the decay.
+
 ### Resuming a run
 
-`scheduled_lr_train` decays the learning rate over a fixed schedule (`step = epoch //
-epochs_per_step`, `lr = init_lr * lr_mult**step`) and after every epoch saves:
+`scheduled_lr_train` computes the learning rate from a schedule (`step` or `wsd`, above) and after
+every epoch saves:
 
 - `../models/{name}/{name}_ep{N}.pt` and `_tmp.pt` — model weights, and
-- `../models/{name}/{name}.state.pt` — the schedule position (next epoch + step) and optimizer
-  state.
+- `../models/{name}/{name}.state.pt` — the schedule position (next epoch, step, and
+  `global_step`) and optimizer state.
 
 Passing `--auto-resume` to `train_net.py` reloads the newest checkpoint **and** that schedule
 state, so training continues exactly where it stopped (correct LR, epoch, and optimizer
-momentum) instead of restarting the schedule. Resuming an already-finished run is a no-op.
-(`--load <path>` remains a one-off weight load that does *not* resume the schedule.)
+momentum) instead of restarting the schedule. Both schedules resume bit-for-bit: `step` LR is a
+function of the epoch, and `wsd` LR is a function of the persisted `global_step`, so a run cut off
+by the wall-clock and resumed reproduces the uninterrupted run (verified). For `wsd`, pass the
+**same `--total-epochs`** to every segment — it defines the schedule's horizon, so changing it
+between segments reshapes the (already-traversed) curve. Resuming an already-finished run is a
+no-op. (`--load <path>` remains a one-off weight load that does *not* resume the schedule.)
 
 ### Fine-tuning / retraining from an existing model (`--init-from`)
 
