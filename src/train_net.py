@@ -43,6 +43,13 @@ def parse_args():
                              "(e.g. 100 selects 100a if present).")
     parser.add_argument('--exclude', type=str, nargs='*', default=None,
                         help="Datasets to drop from the selection (same grammar as --datasets)")
+    parser.add_argument('--aux-data-dir', type=str, default="../datasets_aux/",
+                        help="Directory holding auxiliary datasets that must be selected "
+                             "individually (never included by --datasets all)")
+    parser.add_argument('--aux-datasets', type=str, nargs='+', default=None,
+                        help="Auxiliary datasets to also train on, resolved against "
+                             "--aux-data-dir. Same grammar as --datasets except 'all' is "
+                             "not allowed: auxiliary datasets are opt-in by name.")
     parser.add_argument('--portion', type=float, default=1.0,
                         help="Fraction of each selected dataset to use (random subsample)")
     parser.add_argument('--reload-every', type=int, default=0,
@@ -206,6 +213,25 @@ def main():
         return 1
 
     print(f"Selected {len(tags)} dataset(s): {' '.join(tags)}")
+
+    aux_tags = []
+    if args.aux_datasets:
+        if any(token.strip().lower() == "all" for token in args.aux_datasets):
+            print("Error: 'all' is not allowed for --aux-datasets; "
+                  "auxiliary datasets must be named individually.")
+            return 1
+        args.aux_data_dir = os.path.join(args.aux_data_dir, "")
+        aux_available = discover_dataset_tags(args.aux_data_dir)
+        if not aux_available:
+            print(f"No datasets found in {args.aux_data_dir}")
+            return 1
+        aux_tags = select_dataset_tags(args.aux_datasets, aux_available)
+        if not aux_tags:
+            print(f"--aux-datasets resolved to no datasets. Available in {args.aux_data_dir}:")
+            print("  " + " ".join(aux_available))
+            return 1
+        print(f"Selected {len(aux_tags)} auxiliary dataset(s): {' '.join(aux_tags)}")
+
     if args.list:
         return 0
 
@@ -215,7 +241,9 @@ def main():
 
     # A fresh scatter-loader over a (possibly subsampled) draw of the selected datasets.
     def build_train_loader():
-        features, results = load_from_multiple(tags, portion=args.portion, save_dir=args.data_dir)
+        selection = list(tags) + [(tag, args.portion, args.aux_data_dir) for tag in aux_tags]
+        features, results = load_from_multiple(selection, portion=args.portion,
+                                               save_dir=args.data_dir)
         print(f"Loaded {features.shape[0]} positions ({features.shape[1]} features each)")
         return make_scatter_loader(features, results, batch_size=args.batch_size,
                                    shuffle=True, device=config.device)

@@ -111,6 +111,17 @@ python train_net.py --datasets all --exclude 50 51 vEnd
 python train_net.py --datasets all --list         # preview, don't train
 ```
 
+### Auxiliary datasets (`--aux-datasets`)
+
+Datasets in `--aux-data-dir` (default `../datasets_aux/`, see its README) are **opt-in
+only**: `--datasets all` never touches them, so experimental datasets can be staged there
+without affecting other training runs. `--aux-datasets` uses the same tag grammar, except
+`all` is rejected — each auxiliary dataset must be named individually:
+
+```bash
+python train_net.py --datasets 1-221 --aux-datasets vNovelNc   # finetuning experiment
+```
+
 Other useful flags: `--portion` (subsample each dataset), `--val-name` (validation set, default
 `validation_games`), `--model`/`--d`/`--fd`/`--num-inputs` (architecture; defaults reproduce the
 deployed `NetRelHD(d=16, fd=64, num_inputs=768)`), `--load <ckpt>`, `--device N`, `--no-cuda`,

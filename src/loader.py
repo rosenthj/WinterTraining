@@ -237,17 +237,23 @@ def load_from_multiple(lst, portion=1.0, save_dir="./"):
     """Load and concatenate several desk datasets, optionally subsampling each.
 
     Each element of ``lst`` is either a tag (e.g. ``"100a"``) loaded at the shared
-    ``portion``, or a ``(tag, portion)`` tuple with a per-dataset fraction. When a
+    ``portion``, a ``(tag, portion)`` tuple with a per-dataset fraction, or a
+    ``(tag, portion, dir)`` tuple additionally naming the directory to load from
+    (for datasets living outside ``save_dir``, e.g. the auxiliary dataset dir). When a
     portion < 1, a fresh random subset of that fraction is drawn each call -- so calling
     this repeatedly (see ``train_v2`` / ``train_net.py --reload-every``) streams different
     subsets over time while keeping only ~portion of the corpus resident at once.
     """
     def unpack(el):
+        directory = save_dir
         if isinstance(el, tuple):
-            num, por = el
+            if len(el) == 3:
+                num, por, directory = el
+            else:
+                num, por = el
         else:
             num, por = el, portion
-        return f"{save_dir}features_desk_v{num}.npz", f"{save_dir}targets_desk_v{num}.npz", por
+        return f"{directory}features_desk_v{num}.npz", f"{directory}targets_desk_v{num}.npz", por
 
     # Accumulate into lists and vstack/concatenate once at the end: vstack-ing inside the
     # loop recopies the whole growing matrix each iteration (O(n^2) peak memory and time).
