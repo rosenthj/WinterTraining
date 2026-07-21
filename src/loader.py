@@ -243,6 +243,12 @@ def load_from_multiple(lst, portion=1.0, save_dir="./"):
     portion < 1, a fresh random subset of that fraction is drawn each call -- so calling
     this repeatedly (see ``train_v2`` / ``train_net.py --reload-every``) streams different
     subsets over time while keeping only ~portion of the corpus resident at once.
+
+    A portion > 1 *oversamples*: the dataset is replicated ``floor(portion)`` times plus a
+    fresh random ``portion - floor(portion)`` remainder, so it contributes proportionally
+    more rows (and thus more gradient mass / a larger batch share) than its raw size. This
+    duplicates rows in memory, so prefer lowering the *other* datasets' portion when the
+    goal is to raise one dataset's relative weight on a memory-constrained machine.
     """
     def unpack(el):
         directory = save_dir
@@ -262,13 +268,26 @@ def load_from_multiple(lst, portion=1.0, save_dir="./"):
     for feature_filename, label_filename, por in (unpack(el) for el in lst):
         f0 = scipy.sparse.load_npz(feature_filename)
         r0 = np.load(label_filename)['arr_0']
-        if por < 1.0:
+
+        def random_subset(frac):
             idx = np.arange(len(r0))
             random.shuffle(idx)
-            m_idx = int(por * len(r0))
-            keep = idx < m_idx
-            f0 = f0[keep]
-            r0 = r0[keep]
+            keep = idx < int(frac * len(r0))
+            return f0[keep], r0[keep]
+
+        if por < 1.0:
+            f0, r0 = random_subset(por)
+        elif por > 1.0:
+            # Oversample: floor(por) full copies plus a random fractional remainder.
+            reps = int(por)
+            parts_f, parts_r = [f0] * reps, [r0] * reps
+            frac = por - reps
+            if frac > 0:
+                sf, sr = random_subset(frac)
+                parts_f.append(sf)
+                parts_r.append(sr)
+            f0 = scipy.sparse.vstack(parts_f, format="csr")
+            r0 = np.concatenate(parts_r)
         feature_blocks.append(f0)
         result_blocks.append(r0)
     features = scipy.sparse.vstack(feature_blocks, format="csr")

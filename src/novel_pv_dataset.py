@@ -148,19 +148,48 @@ def expand_base(fen, move_str, nodes, engine, game, stats):
     return candidates
 
 
-def generate(fens, moves, node_counts, rank, order, target, engine_bin):
+def generate(fens, moves, node_counts, rank, order, target, engine_bin,
+             num_sets=1, save_set=None):
+    """Expand bases in ``order`` into ``num_sets`` datasets of ``target`` positions.
+
+    Each set is deduplicated independently and handed to ``save_set(set_no,
+    features, labels, base_indices)`` as soon as it is full, so peak memory
+    stays at the single-set level. Bases are never reused across sets;
+    ``base_indices`` lists exactly the bases expanded into the set (bases
+    skipped after an engine error are excluded).
+    """
     engine = chess.engine.SimpleEngine.popen_uci(engine_bin)
     seen = set()
     blocks, rows = [], []
     label_blocks, labels = [], []
+    set_bases = []
     stats = {"base_used": 0, "max_rank": 0, "searches": 0, "alt_pvs": 0,
              "candidates": 0, "unusable": 0, "duplicates": 0,
              "rank_probe_failed": 0, "probe_failed": 0, "engine_errors": 0,
-             "positions": 0}
+             "positions": 0, "sets_done": 0}
+    set_positions = 0
     start = time.time()
+
+    def finish_set():
+        nonlocal blocks, rows, label_blocks, labels, set_positions, set_bases
+        if rows:
+            blocks.append(scipy.sparse.vstack(rows))
+            label_blocks.append(np.asarray(labels, dtype=np.int8))
+        if not blocks:
+            return
+        stats["sets_done"] += 1
+        save_set(stats["sets_done"], scipy.sparse.vstack(blocks),
+                 np.concatenate(label_blocks), set_bases)
+        blocks, rows, label_blocks, labels = [], [], [], []
+        set_bases = []
+        seen.clear()
+        set_positions = 0
+
     try:
         for idx in order:
-            if stats["positions"] >= target:
+            if set_positions >= target:
+                finish_set()
+            if stats["sets_done"] >= num_sets:
                 break
             stats["base_used"] += 1
             stats["max_rank"] = max(stats["max_rank"], int(rank[idx]) + 1)
@@ -178,6 +207,7 @@ def generate(fens, moves, node_counts, rank, order, target, engine_bin):
                     engine.close()
                 engine = chess.engine.SimpleEngine.popen_uci(engine_bin)
                 continue
+            set_bases.append(idx)
             for board in candidates:
                 stats["candidates"] += 1
                 if not usable(board):
@@ -199,6 +229,7 @@ def generate(fens, moves, node_counts, rank, order, target, engine_bin):
                 rows.append(features)
                 labels.append(int(result[0]))
                 stats["positions"] += 1
+                set_positions += 1
             if len(rows) >= 200_000:
                 blocks.append(scipy.sparse.vstack(rows))
                 label_blocks.append(np.asarray(labels, dtype=np.int8))
@@ -209,12 +240,11 @@ def generate(fens, moves, node_counts, rank, order, target, engine_bin):
                       f"{time.time() - start:.0f}s, rss {rss_gb():.1f}GB", flush=True)
     finally:
         engine.quit()
-    if rows:
-        blocks.append(scipy.sparse.vstack(rows))
-        label_blocks.append(np.asarray(labels, dtype=np.int8))
-    if not blocks:
+    if stats["sets_done"] < num_sets:
+        finish_set()
+    if stats["sets_done"] == 0:
         raise RuntimeError("No positions generated")
-    return scipy.sparse.vstack(blocks), np.concatenate(label_blocks), stats
+    return stats
 
 
 def main():
@@ -231,7 +261,13 @@ def main():
     parser.add_argument('--max-nodes', type=int, default=12800,
                         help="Skip run directories generated with more nodes than this")
     parser.add_argument('--target-positions', type=int, default=10_000_000,
-                        help="Stop once this many positions are stored")
+                        help="Stop once this many positions are stored (per set)")
+    parser.add_argument('--num-sets', type=int, default=1,
+                        help="Number of datasets to emit sequentially; each is "
+                             "deduplicated independently and named <name><i>")
+    parser.add_argument('--no-balance', action='store_true',
+                        help="Process bases in a uniform random order instead of "
+                             "the material-signature round-robin")
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--limit', type=int, default=None,
                         help="Stop scanning after this many csv rows (smoke testing)")
@@ -246,22 +282,35 @@ def main():
         csv_files, args.max_nodes, limit=args.limit)
     print(f"Scanned {rows} rows (dirs <= n{args.max_nodes}): "
           f"{len(fens)} unique adversarial positions")
-    rank, order = balanced_order(sig_codes, sig_names, rng)
+    if args.no_balance:
+        rank = np.zeros(len(fens), dtype=np.int32)
+        order = rng.permutation(len(fens))
+    else:
+        rank, order = balanced_order(sig_codes, sig_names, rng)
     del sig_codes
 
+    def save_set(set_no, features, labels, base_indices):
+        name = args.name if args.num_sets == 1 else f"{args.name}{set_no}"
+        print(f"Set {set_no}: features {features.shape}, "
+              f"label counts: {np.bincount(labels, minlength=3)}, "
+              f"{len(base_indices)} bases", flush=True)
+        scipy.sparse.save_npz(os.path.join(args.out_dir, f"features_{name}.npz"), features)
+        np.savez(os.path.join(args.out_dir, f"targets_{name}.npz"), labels)
+        with open(os.path.join(args.out_dir, f"bases_{name}.csv"), "w") as f:
+            for i in base_indices:
+                f.write(f"{fens[i]}, {moves[i]}, {node_counts[i]}\n")
+
     config.tablebase = chess.syzygy.open_tablebase(args.tablebase)
-    features, labels, stats = generate(fens, moves, node_counts, rank, order,
-                                       args.target_positions, args.engine_bin)
+    stats = generate(fens, moves, node_counts, rank, order,
+                     args.target_positions, args.engine_bin,
+                     num_sets=args.num_sets, save_set=save_set)
     config.tablebase.close()
 
     print(f"Stats: {stats}")
-    print(f"Per-signature cap reached: {stats['max_rank']} "
-          f"(base positions used: {stats['base_used']}/{len(fens)})")
+    if not args.no_balance:
+        print(f"Per-signature cap reached: {stats['max_rank']} "
+              f"(base positions used: {stats['base_used']}/{len(fens)})")
     print(f"TB Queries: {count.total_tb_queries}")
-    print(f"Features: {features.shape}, targets: {labels.shape}, "
-          f"label counts: {np.bincount(labels, minlength=3)}")
-    scipy.sparse.save_npz(os.path.join(args.out_dir, f"features_{args.name}.npz"), features)
-    np.savez(os.path.join(args.out_dir, f"targets_{args.name}.npz"), labels)
 
     return 0
 

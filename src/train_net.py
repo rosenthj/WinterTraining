@@ -52,6 +52,11 @@ def parse_args():
                              "not allowed: auxiliary datasets are opt-in by name.")
     parser.add_argument('--portion', type=float, default=1.0,
                         help="Fraction of each selected dataset to use (random subsample)")
+    parser.add_argument('--aux-portion', type=float, default=None,
+                        help="Portion applied to --aux-datasets instead of --portion. "
+                             "Values > 1 oversample (replicate) the aux data, raising its "
+                             "share of each batch and its per-epoch gradient mass. Defaults "
+                             "to --portion when unset.")
     parser.add_argument('--reload-every', type=int, default=0,
                         help="Resample the training data every N epochs instead of loading it "
                              "all once. With --portion < 1 this bounds memory (only ~portion of "
@@ -241,7 +246,8 @@ def main():
 
     # A fresh scatter-loader over a (possibly subsampled) draw of the selected datasets.
     def build_train_loader():
-        selection = list(tags) + [(tag, args.portion, args.aux_data_dir) for tag in aux_tags]
+        aux_portion = args.portion if args.aux_portion is None else args.aux_portion
+        selection = list(tags) + [(tag, aux_portion, args.aux_data_dir) for tag in aux_tags]
         features, results = load_from_multiple(selection, portion=args.portion,
                                                save_dir=args.data_dir)
         print(f"Loaded {features.shape[0]} positions ({features.shape[1]} features each)")
