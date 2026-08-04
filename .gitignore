@@ -1,5 +1,9 @@
 /datasets/*.npz
+/datasets_aux/*.npz
+/datasets_aux/*.csv
 /logs/*.txt
+/logs/*.log
 /logs/tb/
 /models/*.pt
+/pgns/
 __pycache__/

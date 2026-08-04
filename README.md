@@ -119,7 +119,7 @@ without affecting other training runs. `--aux-datasets` uses the same tag gramma
 `all` is rejected — each auxiliary dataset must be named individually:
 
 ```bash
-python train_net.py --datasets 1-221 --aux-datasets vNovelNc   # finetuning experiment
+python train_net.py --datasets 1-221 --aux-datasets <tag>
 ```
 
 Other useful flags: `--portion` (subsample each dataset), `--val-name` (validation set, default
@@ -472,4 +472,3 @@ are what actually indicate wasted capacity, and ~0 is healthy.
   auxiliary data-generation / analysis utilities.
 - `model.py` — network definitions. The relative-conv family (`NetRel`, `NetRelX`, `NetRelH`,
   `NetRelHD`, …) is what Winter uses; see the section above for the currently deployed one.
-</content>
