@@ -146,54 +146,27 @@ Alternatively, raise `#SBATCH --mem` in `standby_train.sh` and keep `--portion 1
 
 ### Optimizer
 
-`--optimizer sgd` (default) uses SGD with `--momentum` (0.9), historically the best performer.
-`--optimizer ranger` uses Ranger (RAdam + Lookahead + gradient centralization, from
-`ranger.py`) for experimentation. `--weight-decay` applies to either. Ranger typically wants a
-much lower learning rate than the SGD-tuned `--init-lr` (Adam scale, ~10–30× smaller).
+`--optimizer sgd` (the default, and the only option) uses SGD with `--momentum` (0.9), which has
+been the best performer here. `--weight-decay` applies on top of it. Adaptive optimizers of the
+Ranger family were tried and did not improve on SGD, so they have been removed.
 
-By default the optimizer is recreated at each LR-schedule step. For Ranger, add
-`--persistent-optimizer` so a single optimizer spans the whole run (its LR is set externally at
-each step), preserving the RAdam/Lookahead state that Ranger relies on — this is how Ranger is
-meant to run. The persistent optimizer's state is checkpointed and restored across resumed
-segments like everything else.
+By default the optimizer is recreated at each LR-schedule step. `--persistent-optimizer` instead
+builds one optimizer that spans the whole run (its LR is set externally at each step), carrying
+the momentum buffers across LR drops rather than resetting them. Its state is checkpointed and
+restored across resumed segments like everything else. WSD runs (`--schedule wsd`) always use a
+persistent optimizer.
+
+`--clip-grad-norm <v>` clips the total gradient norm each step as a safety net (off by default;
+`train/grad_norm` still reports the pre-clip value so spikes stay visible — read it off
+TensorBoard to pick `v`).
+
+`--reg-weights-only` applies weight decay to the Linear/Conv `.weight` tensors only, exempting
+biases and bias-like parameters (e.g. `b1`, the per-(channel,square) bias map). It only matters
+in combination with `--weight-decay`.
 
 ```bash
 python train_net.py --datasets all --exclude 0 vEnd \
-    --optimizer ranger --persistent-optimizer --init-lr 0.002 --min-lr 1e-5
-```
-
-Ranger tuning knobs: `--eps` (default `1e-5`), `--beta1` / `--beta2` (defaults `0.95` / `0.999`).
-If Ranger's loss *diverges late* (creeps up first, with `train/grad_norm` rising only
-afterwards), the cause is the adaptive step blowing up in flat regions as the second moment
-shrinks — **raise `--eps`** (try `1e-3`, up to `1e-2`) rather than only lowering the LR, which
-merely delays it. `--clip-grad-norm <v>` clips the total gradient norm each step as a safety net
-(off by default; `train/grad_norm` still reports the pre-clip value so spikes stay visible —
-read it off TensorBoard to pick `v`). Example:
-
-```bash
-python train_net.py --datasets all --exclude 0 vEnd --optimizer ranger --persistent-optimizer \
-    --init-lr 0.001 --min-lr 1e-6 --eps 1e-3 --clip-grad-norm 4
-```
-
-`--optimizer winter_ranger` is a RangerLite-inspired variant (`winter_ranger.py`) — Positive-
-Negative Momentum + Stable Weight Decay + Norm Loss + Lookahead — the configuration used by
-Stockfish's NNUE trainer, adapted to this codebase (Lookahead is a periodic merge into the live
-weights, so checkpoints/serialization use the averaged weights with no `eval()`/`train()` hooks;
-its numerics are verified bit-exact against `ranger_lite.py`). Defaults reproduce the full
-RangerLite config (`eps=1e-7`, `betas=(0.9, 0.999)`, norm loss + PNM on, `lookahead-k=5`); the
-update is Adam-scale, so use `--init-lr ~1e-3`. Component knobs for ablation: `--normloss-factor`
-(0 disables), `--no-pnm`, `--lookahead-k`, `--lookahead-alpha`, plus `--weight-decay` (stable,
-variance-normalized here).
-
-`--reg-weights-only` applies norm loss and weight decay to the Linear/Conv `.weight` tensors
-only, exempting biases and bias-like parameters (e.g. `b1`, the per-(channel,square) bias map).
-Recommended for this architecture — norm loss assumes a weight matrix whose first dim indexes
-neurons, so regularizing a bias map is not meaningful. It mainly changes `winter_ranger`'s norm
-loss (which is on by default); for sgd/ranger it only matters with `--weight-decay`.
-
-```bash
-python train_net.py --datasets all --exclude 0 vEnd --optimizer winter_ranger \
-    --persistent-optimizer --init-lr 0.001 --min-lr 1e-6
+    --persistent-optimizer --init-lr 0.008 --min-lr 1e-4 --clip-grad-norm 4
 ```
 
 Loading helpers in `loader.py`:

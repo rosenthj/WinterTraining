@@ -482,34 +482,12 @@ def load_partial_state_dict(model, state_dict, verbose=True):
     return copied, grown, skipped
 
 
-def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0, eps=None, betas=None,
-                   normloss_factor=1e-4, pnm=True, lookahead_k=5, lookahead_alpha=0.5):
-    """Build the optimizer selected on the CLI. SGD+momentum is the historical default.
-
-    ``eps`` and ``betas`` default to None, meaning "use the optimizer's own default"
-    (so each variant gets its appropriate scale). They apply to the Ranger variants only.
-    Options:
-      - sgd: SGD with momentum (best performer historically).
-      - ranger: Ranger2020 (RAdam + Lookahead + gradient centralization, ranger.py).
-      - winter_ranger: RangerLite-inspired (PNM + stable weight decay + norm loss +
-        Lookahead, winter_ranger.py); the extra args tune its components.
-    """
+def make_optimizer(name, params, lr, momentum=0.9, weight_decay=0.0):
+    """Build the optimizer selected on the CLI: SGD with momentum, the only option."""
     name = name.lower()
     if name == "sgd":
         return torch.optim.SGD(params, lr=lr, momentum=momentum, weight_decay=weight_decay)
-    if name == "ranger":
-        from ranger import Ranger
-        return Ranger(params, lr=lr, weight_decay=weight_decay,
-                      eps=1e-5 if eps is None else eps,
-                      betas=(0.95, 0.999) if betas is None else betas)
-    if name == "winter_ranger":
-        from winter_ranger import WinterRanger
-        return WinterRanger(params, lr=lr, weight_decay=weight_decay,
-                            eps=1e-7 if eps is None else eps,
-                            betas=(0.9, 0.999) if betas is None else betas,
-                            pnm=pnm, normloss_factor=normloss_factor,
-                            lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
-    raise ValueError(f"Unknown optimizer '{name}' (expected 'sgd', 'ranger' or 'winter_ranger')")
+    raise ValueError(f"Unknown optimizer '{name}' (expected 'sgd')")
 
 
 def _set_lr(optimizer, lr):
@@ -560,13 +538,13 @@ def split_regularized_params(model):
 
 def _optimizer_params(model, reg_weights_only):
     """Optimizer ``params`` argument: a single group, or two groups that exempt biases /
-    bias-like parameters from weight decay and norm loss when ``reg_weights_only``."""
+    bias-like parameters from weight decay when ``reg_weights_only``."""
     if not reg_weights_only:
         return model.parameters()
     regularized, others = split_regularized_params(model)
     return [
         {"params": regularized},
-        {"params": others, "weight_decay": 0.0, "normloss_factor": 0.0},
+        {"params": others, "weight_decay": 0.0},
     ]
 
 
@@ -580,9 +558,8 @@ def _move_optimizer_state(optimizer, device):
 def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001,
                        lr_mult=0.5, epochs_per_step=1, log_freq=100000, resume_state=None, writer=None,
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
-                       weight_decay=0.0, persistent_optimizer=False, eps=None, betas=None,
-                       clip_grad_norm=None, normloss_factor=1e-4, pnm=True, lookahead_k=5,
-                       lookahead_alpha=0.5, reg_weights_only=False, ce_weight=0.04, draw_weight=0.0,
+                       weight_decay=0.0, persistent_optimizer=False,
+                       clip_grad_norm=None, reg_weights_only=False, ce_weight=0.04, draw_weight=0.0,
                        schedule="step", total_epochs=None, warmup_steps=0, decay_frac=0.1):
     """Train with a learning-rate schedule.
 
@@ -669,9 +646,7 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                 # One continuous optimizer for the whole WSD run (preserves momentum through
                 # the stable->decay transition), so always restore saved state on resume.
                 optimizer = make_optimizer(optimizer_name, _optimizer_params(model, reg_weights_only), lr,
-                                           momentum=momentum, weight_decay=weight_decay, eps=eps, betas=betas,
-                                           normloss_factor=normloss_factor, pnm=pnm,
-                                           lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
+                                           momentum=momentum, weight_decay=weight_decay)
                 if pending_opt_state is not None:
                     optimizer.load_state_dict(pending_opt_state)
                     _move_optimizer_state(optimizer, config.device)
@@ -686,13 +661,11 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
             # Optimizer handling at each LR-schedule step:
             #  - default: recreate a fresh optimizer per step (the original behaviour);
             #  - persistent_optimizer: build it once and span the whole run, just updating the
-            #    learning rate at each step -- this preserves Adam/Lookahead state across LR
-            #    drops, which is how Ranger is meant to be run.
+            #    learning rate at each step -- this carries the momentum buffers across LR
+            #    drops instead of resetting them.
             if optimizer is None:
                 optimizer = make_optimizer(optimizer_name, _optimizer_params(model, reg_weights_only), lr,
-                                           momentum=momentum, weight_decay=weight_decay, eps=eps, betas=betas,
-                                           normloss_factor=normloss_factor, pnm=pnm,
-                                           lookahead_k=lookahead_k, lookahead_alpha=lookahead_alpha)
+                                           momentum=momentum, weight_decay=weight_decay)
                 # On resume restore the saved state: always in persistent mode (one continuous
                 # optimizer), otherwise only when it belongs to this step (a fresh optimizer is
                 # wanted when resuming exactly at a new step boundary).
