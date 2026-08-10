@@ -31,6 +31,51 @@ All scripts are run **from inside `src/`** and use paths relative to it:
 | `../logs/`                  | Training logs |
 | `../../../Chess/TB_Merged`  | Syzygy tablebase directory |
 
+### Machine-specific paths
+
+The SLURM submission scripts need two locations that differ per machine: the conda
+environment and the Syzygy tablebase directory. Neither is committed. Copy the template
+and fill it in once:
+
+```bash
+cp local_env.sh.example local_env.sh     # git-ignored
+```
+
+`local_env.sh` sets `WINTER_CONDA_ENV` and `WINTER_TB_PATH`, and is sourced by
+`generate_dataset.sh`, `standby_train.sh`, `standby_baseline.sh` and
+`datagen/datagen_config.sh`. Exported environment variables take precedence, so a one-off
+run can override without editing it:
+
+```bash
+WINTER_TB_PATH=/other/tb sbatch generate_dataset.sh desk_v312
+```
+
+A script that needs a path it cannot find fails immediately with a message naming the
+variable, rather than running with a wrong default.
+
+### Pushing to the cluster (`sync_to_cluster.sh`)
+
+Code reaches the cluster by `git pull`. What git deliberately does not track — the
+fastchess binary and the DFRC opening book — is pushed by `sync_to_cluster.sh` to
+`WINTER_SYNC_DEST` (also set in `local_env.sh`, so no cluster path is committed):
+
+```bash
+./sync_to_cluster.sh                       # fastchess + opening book
+./sync_to_cluster.sh -n                    # dry run
+./sync_to_cluster.sh --code                # also tracked source, for an uncommitted change
+./sync_to_cluster.sh src/merge_datasets.py # or just one file, by name
+```
+
+The **Winter engine binary is not synced**: a local build does not run on the cluster, so
+it has to be compiled there. Build it as `datagen/Winter` or point `ENGINE` at it in
+`datagen/datagen_config.sh`. fastchess is a static binary and does travel.
+
+It never deletes at the destination (no `--delete`) and always excludes `.git/`, so the
+cluster checkout's history and working state are untouched, as are generated datasets,
+PGNs, checkpoints and logs. `local_env.sh` is excluded even under `--code`: the cluster's
+copy holds *its* paths, and overwriting them with yours would break every job. `--env`
+pushes it anyway if you really mean to.
+
 ## Stage 1: PGN → dataset
 
 Run from `src/`:
@@ -131,6 +176,32 @@ more often non-endgames, only about 16%.
 Because the repair is the only thing making these games usable, they always take every
 tablebase probe regardless of `--tb-relabel-prob`.
 
+### Game validation (`game_filter.py`)
+
+`game_filter.check_game` screens every game before extraction, replacing the separate
+filtering pass that used to run over the shard PGNs. Two of its checks are not a
+data-quality question but a robustness one, and so apply regardless of `--drop-abnormal`:
+an unfinished `*` result raises out of `utils.string_to_result_class`, and an unparsable
+mainline leaves `game.ItGame.make_move` tripping its own assertion. Either aborts the whole
+conversion rather than skipping one game, and data generation runs on the preemptable
+`standby` QOS, so a shard killed mid-write is a live scenario.
+
+It also corrects a class of forfeit the positional test cannot detect. When a side flags on
+the very move that delivers mate, the final position is a genuine checkmate — nothing about
+it looks abnormal — and only the result is wrong. The final position states the result
+outright, so these are corrected from it rather than dropped:
+
+| file | games contradicting a terminal final position |
+|---|---|
+| `desk_v222` | 0.00% |
+| `desk_v312` | 0.10% |
+| `desk_v307` | 0.12% |
+| `desk_v315` | 0.38% |
+
+Every instance found so far is White mating and being scored `0-1`. Left uncorrected they
+are the worst labels in the corpus: a full-length, normally played game teaching that a
+mated king won.
+
 Measured rates over the first 2000 games of each PGN:
 
 | file | rate | file | rate | file | rate |
@@ -155,6 +226,38 @@ tablebase-won endgame entries rises from 91.5% to 98.0%.
 
 The sparse one-hot encoding is the "compressed format" — storing only the handful of nonzero
 entries per 772-dim position is far smaller than dense storage.
+
+### Merging shards (`merge_datasets.py`)
+
+Data generation (see `datagen/`) writes many small PGN shards rather than a few large files.
+Converting each shard independently is what keeps a conversion comfortably inside the SLURM
+wall limit — a 475k-game PGN takes about 1.8 hours of local-equivalent work against a 3:55
+window, where a ~40k-game shard takes about 9 minutes. `merge_datasets.py` then rebuilds the
+per-shard `.npz` pieces into the handful of evenly sized datasets that training loads:
+
+```bash
+# See the split first; writes nothing.
+python merge_datasets.py --glob '../datasets_shards/features_run7_shard*.npz' --dry-run
+
+# Merge into ~16M-row datasets numbered desk_v318, desk_v319, ...
+python merge_datasets.py --glob '../datasets_shards/features_run7_shard*.npz' \
+                         --start-version 318
+```
+
+Each shard's `targets_` file must sit beside its `features_` file; only the features glob is
+given. Shards are never split, so groups are contiguous runs of whole shards, and the group
+count is chosen before the target is recomputed as an even share — which avoids the
+undersized trailing file a plain running-total split produces. Use `--num-files` to fix the
+count directly, `--rows-per-file` to size by rows (this also sets peak memory: a group is
+built with its inputs and its output both resident, so 16M rows peaks near 3.3 GB), and
+`--force` to overwrite. Existing outputs are refused otherwise.
+
+**Outputs take consecutive version numbers, never letter suffixes.** `newest_variants` keeps
+only the newest revision of each version, so writing `desk_v318`/`desk_v318a` from one merge
+would make all but one silently vanish from `--datasets all`. `--start-version` allocates the
+numbers; `--suffix` applies one revision letter across all of them, which still leaves their
+numbers distinct. Keep the shards themselves outside `../datasets/` so
+`discover_dataset_tags` never picks them up as datasets in their own right.
 
 ## Stage 2: Training
 
@@ -519,6 +622,8 @@ are what actually indicate wasted capacity, and ~0 is healthy.
 
 ## Other scripts
 
+- `merge_datasets.py` — merges per-shard datasets into evenly sized ones (see Stage 1).
+- `game_filter.py` — game-level validation used by `pgn_to_dataset.py` (see Stage 1).
 - `gen_ending_data.py`, `max_entropy_extraction.py`, `move_order_writer.py`, `count.py` —
   auxiliary data-generation / analysis utilities.
 - `model.py` — network definitions. The relative-conv family (`NetRel`, `NetRelX`, `NetRelH`,

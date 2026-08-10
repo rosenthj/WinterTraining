@@ -11,10 +11,15 @@
 #SBATCH --output=logs/%x_%j.out
 
 # Convert one PGN file into a training dataset (features_<name>.npz + targets_<name>.npz)
-# on the cluster. This is CPU-only work (python-chess + scipy); the GPU requested by the
-# a100-80gb partition sits idle. If your partition allows GPU-less jobs you can drop the
-# `--gpus-per-node=1` line above to schedule faster and free the GPU. After the
-# get_features optimizations a ~250k-game file converts comfortably within the 3:55 window.
+# on the cluster. This is CPU-only work (python-chess + scipy) and the requested GPU sits
+# idle throughout, but a GPU-less job cannot be submitted to these partitions, and the A100
+# partitions have far more nodes than the others -- so asking for an A100 actually schedules
+# sooner than asking for a lesser GPU.
+#
+# Sizing: a shard of ~40k games converts in minutes, where a 475k-game file needs roughly
+# 1.8 hours of local-equivalent work against the 3:55 window -- thin enough that a slower
+# node alone exhausts it. Prefer converting per shard (see the datagen pipeline) over
+# feeding whole merged PGNs through this script.
 #
 # Usage (normally via sbatch, fanned out by submit_gen.sh):
 #   generate_dataset.sh <name> [extra pgn_to_dataset.py args...]
@@ -24,16 +29,25 @@
 
 set -euo pipefail
 
-module load conda
-conda activate /home/rosenth0/.conda/envs/cent7/2024.02-py311/chess_gfn
+REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+# Machine-specific paths live in the git-ignored local_env.sh; see local_env.sh.example.
+# Anything already exported wins, so a one-off run can override without editing it.
+if [ -f "$REPO_DIR/local_env.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$REPO_DIR/local_env.sh"
+fi
+: "${WINTER_CONDA_ENV:?set WINTER_CONDA_ENV (copy local_env.sh.example to local_env.sh)}"
+: "${WINTER_TB_PATH:?set WINTER_TB_PATH (copy local_env.sh.example to local_env.sh)}"
 
-cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")}/src"
+module load conda
+conda activate "$WINTER_CONDA_ENV"
+
+cd "$REPO_DIR/src"
 
 NAME="${1:?Usage: generate_dataset.sh <name> [pgn_to_dataset.py args...]}"
 shift
 
-# Syzygy tablebase location on the cluster. Override by exporting TB_PATH before sbatch.
-TB_PATH="${TB_PATH:-/scratch/gilbreth/rosenth0/data/egtb6/}"
+TB_PATH="${TB_PATH:-$WINTER_TB_PATH}"
 
 ARGS=(--name "$NAME" --tablebase "$TB_PATH" "$@")
 echo "Running: python -u pgn_to_dataset.py ${ARGS[*]}"

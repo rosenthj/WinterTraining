@@ -8,6 +8,7 @@ import count
 
 from utils import entropy, string_to_result_class
 from chess_utils import get_features, get_pos_eval
+from game_filter import check_game
 from game import ItGame
 from loader import CSRDataset, merge_desk
 
@@ -169,31 +170,6 @@ def data_from_fen_res_set(fens, res, force_tb=False):
 #    return torch.cat(features), torch.cat(results)
 
 
-def abnormal_final_board(g):
-    """Return the final board if the game's decisive result is unexplained by any chess rule.
-
-    A time forfeit is recorded by writing the loser's final move and then scoring the game
-    against them, so the game stops at a position that is neither mate, stalemate,
-    insufficient material, a repetition, nor a 50-move draw. The recorded result is then
-    unrelated to the position: across desk_v312 the forfeiting side was materially ahead
-    almost exactly as often as behind, and 116 games ended with the result inverted
-    relative to the Syzygy verdict.
-
-    The board is returned rather than a bool because the caller needs its piece count to
-    decide whether the game is salvageable -- see extract_data_from_game.
-
-    Repetition is tested at twofold, the permissive reading, so that a genuine repetition
-    is never mistaken for a forfeit.
-    """
-    if g.headers["Result"] == "1/2-1/2":
-        return None
-    board = g.end().board()
-    if (board.is_checkmate() or board.is_stalemate() or board.is_insufficient_material()
-            or board.is_repetition(2) or board.halfmove_clock >= 100):
-        return None
-    return board
-
-
 def extract_data_from_game(g):
     count.total_games += 1
     # Training data is DFRC and must not contain the regular chess starting position.
@@ -203,12 +179,20 @@ def extract_data_from_game(g):
     if g.board().board_fen() == chess.STARTING_BOARD_FEN:
         count.skipped_startpos += 1
         return None
+    # Structural checks always run: they screen out games that would abort the whole
+    # conversion rather than merely be mislabelled. The forfeit verdict is only acted on
+    # when asked for.
+    reason, forfeit_board = check_game(g)
+    if reason is not None:
+        count.rejected[reason] += 1
+        return None
+    if not config.drop_abnormal:
+        forfeit_board = None
     # A time forfeit's recorded result is bogus, but it is only ever used as the seed of the
     # backwards walk in data_from_fen_res_set: if the game reached a tablebase position, the
     # probe at the entry into the endgame overwrites it and every earlier position is labelled
     # from the Syzygy verdict instead. Such a game is therefore fully repairable and is kept.
     # Without a tablebase position there is nothing to override the result, so it is dropped.
-    forfeit_board = abnormal_final_board(g) if config.drop_abnormal else None
     if forfeit_board is not None and len(forfeit_board.piece_map()) > 6:
         # Piece count never increases, so a game ending above six pieces never held a tablebase
         # position. Checked before extracting fens, which is much the more expensive half.

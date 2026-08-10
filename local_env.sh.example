@@ -1,0 +1,25 @@
+#!/bin/bash
+#
+# Machine-specific filesystem paths. Copy to local_env.sh and fill in; local_env.sh is
+# git-ignored, so these locations stay out of the repository.
+#
+#     cp local_env.sh.example local_env.sh
+#
+# Sourced by the SLURM submission scripts (generate_dataset.sh, standby_train.sh,
+# standby_baseline.sh) and by datagen/datagen_config.sh. Anything already exported in the
+# environment wins, so a one-off run can override without editing this file:
+#
+#     WINTER_TB_PATH=/other/tb sbatch generate_dataset.sh desk_v312
+
+# Conda environment holding python-chess, scipy and torch. Required by every script that
+# runs Python on the cluster.
+WINTER_CONDA_ENV="${WINTER_CONDA_ENV:-/path/to/conda/envs/chess}"
+
+# Syzygy tablebase directory. Only WDL (.rtbw) files are read; DTZ is never probed.
+# Required for dataset conversion; unused by training.
+WINTER_TB_PATH="${WINTER_TB_PATH:-/path/to/syzygy}"
+
+# Destination for sync_to_cluster.sh. Either an rsync remote or, when running on the
+# cluster itself, a plain path.
+#   WINTER_SYNC_DEST="user@host:/scratch/.../git/WinterTraining"
+WINTER_SYNC_DEST="${WINTER_SYNC_DEST:-}"

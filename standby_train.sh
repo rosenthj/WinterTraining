@@ -21,10 +21,18 @@
 
 set -euo pipefail
 
-module load conda
-conda activate /home/rosenth0/.conda/envs/cent7/2024.02-py311/chess_gfn
+REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+# Machine-specific paths live in the git-ignored local_env.sh; see local_env.sh.example.
+if [ -f "$REPO_DIR/local_env.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$REPO_DIR/local_env.sh"
+fi
+: "${WINTER_CONDA_ENV:?set WINTER_CONDA_ENV (copy local_env.sh.example to local_env.sh)}"
 
-cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")}/src"
+module load conda
+conda activate "$WINTER_CONDA_ENV"
+
+cd "$REPO_DIR/src"
 
 RUN_NAME="${1:?Usage: standby_train.sh <run_name> [train args...]}"
 shift

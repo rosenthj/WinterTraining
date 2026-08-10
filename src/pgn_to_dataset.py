@@ -62,6 +62,14 @@ def main():
     print(f"TB Queries: {count.total_tb_queries}")
     print(f"Results changed by TB Query: {count.tb_changed}")
     print(f"Games skipped (regular starting position): {count.skipped_startpos}")
+    if count.rejected:
+        total = sum(count.rejected.values())
+        print(f"Games rejected as unusable: {total} of {count.total_games}")
+        for reason, n in count.rejected.most_common():
+            print(f"  {reason}: {n}")
+    if count.relabelled_terminal:
+        print(f"Games whose result was corrected from a terminal final position: "
+              f"{count.relabelled_terminal}")
     if config.drop_abnormal:
         forfeits = count.skipped_abnormal + count.repaired_abnormal
         rate = 100.0 * forfeits / max(count.total_games, 1)

@@ -7,3 +7,16 @@
 /models/*.pt
 /pgns/
 __pycache__/
+
+# Data generation. The scripts are tracked; the binaries, opening book and
+# generated games are not -- see datagen/README.md for where to get them.
+/datagen/data/
+/datagen/logs/
+/datagen/*.epd
+/datagen/fastchess
+/datagen/cutechess-cli
+/datagen/Winter*
+
+# Machine-specific filesystem paths (conda env, tablebase location). Kept out of the
+# repository; local_env.sh.example is the tracked template.
+/local_env.sh
