@@ -19,6 +19,10 @@ WINTER_CONDA_ENV="${WINTER_CONDA_ENV:-/path/to/conda/envs/chess}"
 # Required for dataset conversion; unused by training.
 WINTER_TB_PATH="${WINTER_TB_PATH:-/path/to/syzygy}"
 
+# Winter UCI binary for self-play. It must be compiled on the machine that runs the games,
+# so it is never synced. Only needed if it is not at datagen/Winter.
+#   WINTER_ENGINE="${WINTER_ENGINE:-/path/to/Winter}"
+
 # Destination for sync_to_cluster.sh. Either an rsync remote or, when running on the
 # cluster itself, a plain path.
 #   WINTER_SYNC_DEST="user@host:/scratch/.../git/WinterTraining"

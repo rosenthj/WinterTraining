@@ -11,8 +11,19 @@
 # Directory containing this config (and the scripts / Winter binary / book).
 DATAGEN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Machine-specific paths come from the git-ignored ../local_env.sh so that no filesystem
+# location is committed; see local_env.sh.example. Sourced first, before anything below
+# takes a default, so local_env.sh can override any of them. Variables already exported in
+# the environment still win, since every setting below uses ${VAR:-default}.
+if [ -f "$DATAGEN_DIR/../local_env.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$DATAGEN_DIR/../local_env.sh"
+fi
+
 # ---- Engine -----------------------------------------------------------------
-ENGINE="${ENGINE:-$DATAGEN_DIR/Winter}"        # Winter UCI binary (CPU engine)
+# The engine must be built on the cluster, so its location varies; set WINTER_ENGINE in
+# local_env.sh if it is not at datagen/Winter.
+ENGINE="${ENGINE:-${WINTER_ENGINE:-$DATAGEN_DIR/Winter}}"   # Winter UCI binary (CPU)
 HASH_MB="${HASH_MB:-64}"                        # transposition table per engine
 THREADS="${THREADS:-1}"                         # 1 search thread per engine
 
@@ -110,13 +121,6 @@ LOG_DIR="${LOG_DIR:-$DATAGEN_DIR/logs}"
 # features_desk_v*.npz, and a shard sitting there would be picked up as a dataset in its
 # own right.
 SHARD_DATASET_DIR="${SHARD_DATASET_DIR:-$DATAGEN_DIR/data/shards}"
-
-# Machine-specific paths come from the git-ignored ../local_env.sh so that no filesystem
-# location is committed; see local_env.sh.example. Environment variables still win.
-if [ -f "$DATAGEN_DIR/../local_env.sh" ]; then
-    # shellcheck source=/dev/null
-    source "$DATAGEN_DIR/../local_env.sh"
-fi
 
 # Syzygy WDL tablebases. Only WDL (.rtbw) is read; DTZ is never probed.
 TB_PATH="${TB_PATH:-${WINTER_TB_PATH:-}}"
