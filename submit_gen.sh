@@ -15,6 +15,12 @@
 # which calls   pgn_to_dataset.py --name <name> --tablebase "$TB_PATH"
 #
 # Override the tablebase path for every job:  TB_PATH=/some/path ./submit_gen.sh ...
+#
+# Pass extra pgn_to_dataset.py flags to every job via GEN_ARGS. Because --out-suffix tags the
+# dataset and not the PGN, one GEN_ARGS regenerates a whole batch under a new revision:
+#   GEN_ARGS="--drop-abnormal --out-suffix a" ./submit_gen.sh desk_v{303..311}
+# reads desk_v303.pgn..desk_v311.pgn and writes features_desk_v303a.npz..desk_v311a.npz,
+# which train_net.py then prefers over the originals for --datasets 303-311 and for 'all'.
 
 set -euo pipefail
 
@@ -44,7 +50,7 @@ for name in "$@"; do
     if [ ! -f "$pgn" ]; then
         echo "  Warning: $pgn not found on the login node (continuing; it is read on the compute node)." >&2
     fi
-    job_id="$(sbatch --parsable "${EXPORT_ARG[@]}" "$WORKER" "$name")"
+    job_id="$(sbatch --parsable "${EXPORT_ARG[@]}" "$WORKER" "$name" ${GEN_ARGS:-})"
     echo "  $name -> job $job_id"
 done
 

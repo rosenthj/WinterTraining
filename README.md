@@ -47,6 +47,18 @@ Options:
 - `--out-dir` — where the generated `.npz` files are written (default `./../datasets/`,
   i.e. the same directory the loaders read from).
 - `--tablebase` — path to the Syzygy tablebase directory (default `../../../Chess/TB_Merged`).
+- `--tb-relabel-prob` — probability of relabelling an endgame position past the entry into the
+  endgame from the tablebase (default `1.0`, i.e. relabel everything). See below.
+- `--drop-abnormal` — handle games that ended in a time forfeit (default off): repaired from
+  the tablebase where the game reached one, dropped where it did not. Required for
+  `desk_v303`–`desk_v317`. See below.
+- `--out-suffix` — revision suffix appended to the dataset name but **not** the PGN name, so a
+  regenerated dataset can be tagged without renaming or copying its PGN. Lowercase letters only.
+  `--name desk_v311 --out-suffix a` reads `../pgns/desk_v311.pgn` and writes
+  `features_desk_v311a.npz` / `targets_desk_v311a.npz`. `train_net.py` resolves a version to its
+  newest revision (`loader.newest_variants`), so once `desk_v311a` exists both `--datasets 311`
+  and `--datasets all` pick it over `desk_v311` with no further changes — and the old dataset can
+  stay on disk as a fallback.
 
 This reads `../pgns/merged.pgn` and produces two files in `../datasets/`:
 
@@ -74,6 +86,72 @@ For each game (`data.py`):
 - **Tablebase correction**: for positions with ≤6 pieces and no castling rights, the game
   result is replaced by the exact Syzygy WDL value. The script reports how many results
   were changed by tablebase probes.
+
+  Positions are labelled walking backwards from the end of the game, threading the result
+  as it goes. Since the piece count never increases, the tablebase positions form a suffix
+  of the game, and the **entry into the endgame** — the earliest position that can be probed
+  — is the one whose corrected result propagates back through the whole middlegame. Deeper
+  endgame positions only ever relabel themselves.
+
+  `--tb-relabel-prob p` exploits that split. The entry position is always probed, so the
+  backward propagation is unchanged, but each deeper endgame position keeps the game's
+  **actual outcome** with probability `1 - p` instead of the tablebase value. This retains
+  the practical difficulty of actually converting the endgame, which relabelling everything
+  erases. As a side effect it also cuts tablebase probes: on `desk_v312`, `p = 0` reduces
+  them from ~8.6 per endgame-reaching game to 1.
+
+  Note that Winter itself has no tablebase probing in search, so the net is the only endgame
+  evaluator — `p = 0` gives up the exact WDL signal entirely. Intermediate values are the
+  interesting regime, though on forfeit-filtered data the game result and the Syzygy verdict
+  agree on ~97% of endgame positions, so there is not much for this knob to preserve.
+
+### Time forfeits (`--drop-abnormal`)
+
+Some self-play runs were generated on contended cluster nodes and contain a large number of
+games lost on time. fastchess records these by writing the forfeiting side's last move and
+then scoring the game against them, so the game stops at a position that is neither mate,
+stalemate, insufficient material, a repetition, nor a 50-move draw — which is exactly how
+`data.abnormal_final_board` detects them, with no tablebase needed.
+
+The recorded result of such a game is unrelated to the position: across `desk_v312` the
+forfeiting side was materially *ahead* about as often as behind, and 116 games in the first
+6000 ended with a result exactly inverted relative to the Syzygy verdict.
+
+**Such a game is repaired where possible rather than discarded.** The recorded result is only
+ever the seed of the backwards walk in `data_from_fen_res_set`, so if the game reached a
+tablebase position the probe at the entry into the endgame overwrites it, and every earlier
+position is labelled from the Syzygy verdict instead — which is exactly the behaviour wanted
+from a forfeited game. Measured on `desk_v312` and `desk_v315`, the pre-endgame label of such
+a game matched the entry verdict in 324 of 324 cases, having overridden the recorded result in
+203 of them. A forfeited game that never reached a tablebase position has nothing to override
+its result and is dropped. On `desk_v312` that keeps roughly 54% of forfeited games (about 10%
+of the corpus that a whole-game drop would discard); on `desk_v315`, where forfeits are far
+more often non-endgames, only about 16%.
+
+Because the repair is the only thing making these games usable, they always take every
+tablebase probe regardless of `--tb-relabel-prob`.
+
+Measured rates over the first 2000 games of each PGN:
+
+| file | rate | file | rate | file | rate |
+|---|---|---|---|---|---|
+| `desk_v222`–`v224` | 0.0% | `desk_v305` | 29.6% | `desk_v311` | 22.9% |
+| `desk_v300` | 0.0% | `desk_v306` | 7.6% | `desk_v312` | 13.8% |
+| `desk_v301` | 1.6% | `desk_v307` | 29.7% | `desk_v313` | 1.0% |
+| `desk_v302` | 2.3% | `desk_v308` | 2.2% | `desk_v314` | 0.8% |
+| `desk_v303` | 11.7% | `desk_v309` | 12.3% | `desk_v315` | 52.5% |
+| `desk_v304` | 9.9% | `desk_v310` | 6.2% | `desk_v316` | 48.1% |
+| | | | | `desk_v317` | 4.0% |
+
+The rate tracks node contention rather than any tournament setting — `desk_v313` and
+`desk_v314` were generated alongside `desk_v315` and `desk_v316`. Newer runs handle this at
+shard merge time, so the flag is off by default and is only needed when regenerating these
+files. It is a no-op on clean PGNs.
+
+Filtering also removes most of what looked like endgame conversion failures. On `desk_v312`,
+the share of endgame positions where the game result differs from the Syzygy verdict falls
+from 14.6% to 2.8% at six pieces and from 18.0% to 2.7% at five, and the conversion rate of
+tablebase-won endgame entries rises from 91.5% to 98.0%.
 
 The sparse one-hot encoding is the "compressed format" — storing only the handful of nonzero
 entries per 772-dim position is far smaller than dense storage.

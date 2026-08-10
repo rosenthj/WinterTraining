@@ -3,6 +3,7 @@ import chess.pgn
 import numpy as np
 import scipy
 import torch
+import config
 import count
 
 from utils import entropy, string_to_result_class
@@ -100,16 +101,54 @@ def load_all_games(pgn_filename, f=None):
     return lst
 
 
-def data_from_fen_res_set(fens, res):
+def is_tb_position(fen):
+    """True if get_features would rewrite this fen's label from the tablebase.
+
+    Mirrors the condition in chess_utils.get_standardised_board_and_result (at most six
+    pieces and no castling rights) but reads it straight off the fen string, since the
+    board transforms applied there change neither the piece count nor whether any
+    castling rights exist.
+    """
+    placement, _, castling = fen.split(' ', 3)[:3]
+    if castling != '-':
+        return False
+    return sum(c.isalpha() for c in placement) <= 6
+
+
+def data_from_fen_res_set(fens, res, force_tb=False):
     features = []
     results = []
     res = string_to_result_class(res)
     og_res = res
-    for fen in reversed(fens):
-        f, r, res = get_features(fen, res, cond_h_flip=np.random.randint(2), cond_v_flip=np.random.randint(2),
-                                 get_w_persp_result=True)
-        if res != og_res:
-            count.total_changed += 1
+    # Piece count never increases, so the tablebase positions form a suffix of the game.
+    # Walking backwards each probe overwrites the previous one, which means only the
+    # earliest tablebase position -- the entry point into the endgame -- actually
+    # propagates its result into the rest of the game; the deeper ones only relabel
+    # themselves. So the entry point is always probed, and the deeper positions are
+    # relabelled only with probability tb_relabel_prob. The rest keep the game's actual
+    # outcome, which retains the practical difficulty of converting the endgame (and
+    # skips the probe).
+    p = 1.0 if force_tb else config.tb_relabel_prob
+    entry = -1
+    if p < 1.0:
+        for i, fen in enumerate(fens):
+            if is_tb_position(fen):
+                entry = i
+                break
+    for i in range(len(fens) - 1, -1, -1):
+        fen = fens[i]
+        probe = True
+        if p < 1.0 and i != entry and is_tb_position(fen):
+            probe = np.random.random() < p
+        # A skipped position must be labelled from the game result rather than the
+        # threaded res, otherwise a deeper probe would leak into it.
+        f, r, probed_res = get_features(fen, res if probe else og_res,
+                                        cond_h_flip=np.random.randint(2), cond_v_flip=np.random.randint(2),
+                                        get_w_persp_result=True, tb_probe=probe)
+        if probe:
+            res = probed_res
+            if res != og_res:
+                count.total_changed += 1
         features.append(f)
         results.append(r)
     if len(features) == 0:
@@ -130,7 +169,33 @@ def data_from_fen_res_set(fens, res):
 #    return torch.cat(features), torch.cat(results)
 
 
+def abnormal_final_board(g):
+    """Return the final board if the game's decisive result is unexplained by any chess rule.
+
+    A time forfeit is recorded by writing the loser's final move and then scoring the game
+    against them, so the game stops at a position that is neither mate, stalemate,
+    insufficient material, a repetition, nor a 50-move draw. The recorded result is then
+    unrelated to the position: across desk_v312 the forfeiting side was materially ahead
+    almost exactly as often as behind, and 116 games ended with the result inverted
+    relative to the Syzygy verdict.
+
+    The board is returned rather than a bool because the caller needs its piece count to
+    decide whether the game is salvageable -- see extract_data_from_game.
+
+    Repetition is tested at twofold, the permissive reading, so that a genuine repetition
+    is never mistaken for a forfeit.
+    """
+    if g.headers["Result"] == "1/2-1/2":
+        return None
+    board = g.end().board()
+    if (board.is_checkmate() or board.is_stalemate() or board.is_insufficient_material()
+            or board.is_repetition(2) or board.halfmove_clock >= 100):
+        return None
+    return board
+
+
 def extract_data_from_game(g):
+    count.total_games += 1
     # Training data is DFRC and must not contain the regular chess starting position.
     # Some older/fan-collected games may still begin from it, so drop any such game.
     # board_fen() is the piece placement only; STARTING_BOARD_FEN matches when both
@@ -138,8 +203,27 @@ def extract_data_from_game(g):
     if g.board().board_fen() == chess.STARTING_BOARD_FEN:
         count.skipped_startpos += 1
         return None
+    # A time forfeit's recorded result is bogus, but it is only ever used as the seed of the
+    # backwards walk in data_from_fen_res_set: if the game reached a tablebase position, the
+    # probe at the entry into the endgame overwrites it and every earlier position is labelled
+    # from the Syzygy verdict instead. Such a game is therefore fully repairable and is kept.
+    # Without a tablebase position there is nothing to override the result, so it is dropped.
+    forfeit_board = abnormal_final_board(g) if config.drop_abnormal else None
+    if forfeit_board is not None and len(forfeit_board.piece_map()) > 6:
+        # Piece count never increases, so a game ending above six pieces never held a tablebase
+        # position. Checked before extracting fens, which is much the more expensive half.
+        count.skipped_abnormal += 1
+        return None
     fens, res = extract_fens_from_game(g)
-    return data_from_fen_res_set(fens, res)
+    if forfeit_board is not None and not any(is_tb_position(f) for f in fens):
+        # Reached six pieces, but no position that survived sampling is probeable.
+        count.skipped_abnormal += 1
+        return None
+    if forfeit_board is not None:
+        count.repaired_abnormal += 1
+    # The repair is the only reason a forfeited game is usable, so it must not be subject to
+    # tb_relabel_prob -- those games always take every probe.
+    return data_from_fen_res_set(fens, res, force_tb=forfeit_board is not None)
 
 
 def gen_dataset_from_pgn(path="./../pgns/CCRL-404FRCv2.pgn"):
@@ -149,14 +233,22 @@ def gen_dataset_from_pgn(path="./../pgns/CCRL-404FRCv2.pgn"):
 
 
 def gen_dataset_helper(name, batch_size=16, shuffle=True, save=False, pgn_dir="./../pgns/",
-                       out_dir="./../datasets/"):
+                       out_dir="./../datasets/", out_name=None):
+    """Build a dataset from {pgn_dir}{name}.pgn, writing it under ``out_name`` if given.
+
+    Separating the two lets a regenerated dataset carry a revision tag (desk_v311 ->
+    desk_v311a) without renaming the PGN. loader.newest_variants then prefers the
+    revision over the original for the same version number.
+    """
     print(f"generating dataset from {name}")
     features, results = gen_dataset_from_pgn(f"{pgn_dir}{name}.pgn")
+    out_name = out_name or name
     if save:
-        scipy.sparse.save_npz(f"{out_dir}features_{name}.npz", features)
+        scipy.sparse.save_npz(f"{out_dir}features_{out_name}.npz", features)
         # Labels are only {0, 1, 2}; int8 stores them exactly at 1/8th the int64 size.
         # The loader casts to torch.long per batch, so the on-disk dtype is irrelevant.
-        np.savez(f"{out_dir}targets_{name}.npz", results.astype(np.int8))
+        np.savez(f"{out_dir}targets_{out_name}.npz", results.astype(np.int8))
+        print(f"wrote {out_dir}features_{out_name}.npz and {out_dir}targets_{out_name}.npz")
     return torch.utils.data.DataLoader(CSRDataset(features, results), batch_size=batch_size, shuffle=shuffle)
 
 

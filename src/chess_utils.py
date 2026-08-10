@@ -52,7 +52,7 @@ def tb_probe_result(board):
 
 
 def get_standardised_board_and_result(fen, result, cond_h_flip=False, cond_v_flip=False,
-                                      get_white_perspective_result=False):
+                                      get_white_perspective_result=False, tb_probe=True):
     board = chess.Board(chess960=True)
     board.set_fen(fen)
     hmc = board.halfmove_clock
@@ -65,7 +65,7 @@ def get_standardised_board_and_result(fen, result, cond_h_flip=False, cond_v_fli
         board = board.transform(chess.flip_horizontal)
     if board.pawns == 0 and cond_v_flip:
         board = board.transform(chess.flip_vertical)
-    if (len(board.piece_map()) <= 6 and not board.has_castling_rights(chess.WHITE)
+    if (tb_probe and len(board.piece_map()) <= 6 and not board.has_castling_rights(chess.WHITE)
             and not board.has_castling_rights(chess.BLACK)):
         assert hmc == board.halfmove_clock
         old_result = result
@@ -95,8 +95,10 @@ def get_board_tensor(board, sparse=False):
     return torch.Tensor(features).view(1, -1)
 
 
-def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False, get_w_persp_result=False):
-    board, result, wp_res = get_standardised_board_and_result(fen, result_str, cond_h_flip, cond_v_flip, True)
+def get_features(fen, result_str, cond_h_flip=False, cond_v_flip=False, get_w_persp_result=False,
+                 tb_probe=True):
+    board, result, wp_res = get_standardised_board_and_result(fen, result_str, cond_h_flip, cond_v_flip, True,
+                                                              tb_probe=tb_probe)
     result = torch.tensor([result])
     # The feature vector is one-hot, so build the CSR row straight from its nonzero
     # columns instead of allocating a dense 772-vector and rescanning it for nonzeros.
