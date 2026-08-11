@@ -27,8 +27,16 @@
 
 set -euo pipefail
 
-# Resolve and load shared config.
-SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# Resolve and load shared config. SLURM runs a *copy* of this script from the spool
+# directory, so ${BASH_SOURCE[0]} does not point at the checkout; the submitter exports the
+# real location. SLURM_SUBMIT_DIR only happens to work when sbatch was run from this
+# directory, so it is a fallback rather than the primary.
+SCRIPT_DIR="${DATAGEN_SCRIPT_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}}"
+if [ ! -f "$SCRIPT_DIR/datagen_config.sh" ]; then
+    echo "Error: datagen_config.sh not found in $SCRIPT_DIR" >&2
+    echo "       Submit via submit_datagen.sh, which exports DATAGEN_SCRIPT_DIR." >&2
+    exit 1
+fi
 # shellcheck source=datagen_config.sh
 source "$SCRIPT_DIR/datagen_config.sh"
 

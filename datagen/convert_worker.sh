@@ -13,7 +13,16 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# SLURM runs a *copy* of this script from /var/spool/slurm/job*/slurm_script, so
+# ${BASH_SOURCE[0]} points into the spool directory and the config is not beside it. The
+# submitter knows the real location and exports it; SLURM_SUBMIT_DIR is a fallback for a
+# hand-submitted job, and BASH_SOURCE for running the script directly.
+SCRIPT_DIR="${DATAGEN_SCRIPT_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}}"
+if [ ! -f "$SCRIPT_DIR/datagen_config.sh" ]; then
+    echo "Error: datagen_config.sh not found in $SCRIPT_DIR" >&2
+    echo "       Submit via submit_convert.sh, which exports DATAGEN_SCRIPT_DIR." >&2
+    exit 1
+fi
 # shellcheck source=datagen_config.sh
 source "$SCRIPT_DIR/datagen_config.sh"
 

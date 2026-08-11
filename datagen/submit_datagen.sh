@@ -103,7 +103,7 @@ JOB_ID="$(sbatch --parsable \
     --job-name="$SLURM_JOB_NAME" \
     --array="$ARRAY_SPEC" \
     --output="$LOG_DIR/%x_%A_%a.out" \
-    --export=ALL,DATASET="$DATASET" \
+    --export=ALL,DATAGEN_SCRIPT_DIR="$SCRIPT_DIR",DATASET="$DATASET" \
     "$SCRIPT_DIR/datagen_worker.sh")"
 
 echo "Submitted array job $JOB_ID  (tasks $ARRAY_SPEC)"

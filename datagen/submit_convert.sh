@@ -108,7 +108,7 @@ JOB_ID="$(sbatch --parsable \
     --job-name="$CONVERT_JOB_NAME" \
     --array="$ARRAY_SPEC" \
     --output="$LOG_DIR/%x_%A_%a.out" \
-    --export=ALL,MANIFEST="$MANIFEST",SHARD_INDEX_BASE=0 \
+    --export=ALL,DATAGEN_SCRIPT_DIR="$SCRIPT_DIR",MANIFEST="$MANIFEST",SHARD_INDEX_BASE=0 \
     "$SCRIPT_DIR/convert_worker.sh")"
 
 echo "Submitted array job $JOB_ID  (tasks $ARRAY_SPEC)"
