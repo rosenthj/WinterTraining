@@ -60,6 +60,39 @@ campaign; it also leaves each datagen shard its full 3:55 for games. Reruns are
 safe — a shard whose dataset already exists is skipped, so resubmitting after a
 partial failure only redoes what is missing (`CONVERT_FORCE=1` to redo all).
 
+### Building a validation set instead
+
+The same three stages produce a validation set; only step 2 changes. Pass
+`--positions-per-game 1` so each game contributes exactly one position, drawn
+uniformly from the positions it yielded, and `--seed` so the set can be
+regenerated identically later:
+
+```bash
+# 2'. Convert, keeping one position per game
+CONVERT_ARGS="--drop-abnormal --positions-per-game 1 --seed 0" ./submit_convert.sh new_validation
+
+# 3'. Merge into a single dataset, under a name the loader will not pick up as
+#     training data (it globs features_desk_v*.npz)
+python merge_datasets.py --glob '../datagen/data/shards/features_new_validation_shard*.npz' \
+                         --base-name new_validation --start-version 1 --num-files 1
+```
+
+Then train against it with `--val-name new_validation1` (`merge_datasets.py`
+always appends a version number, hence the `1`).
+
+Why one per game: positions from the same game share a result, so a validation
+set drawn from a few games has a far smaller effective sample size than its row
+count suggests. It also removes a length bias — weighting every position equally
+over-represents long games, which are not drawn as often as short ones. Measured
+over 400 games from `winter_v1_shard00029`, the all-positions draw rate is 46.4%
+against 51.0% one-per-game.
+
+The subsampling happens *after* label extraction, not before: `data.py` threads
+the result backwards through the game, so the Syzygy probe at the entry into the
+endgame overwrites the recorded result for every earlier position. Drawing a
+position first and labelling it on its own would disagree with how training
+labels that same position.
+
 ### Why shards, not one big PGN
 
 A 475k-game PGN takes roughly 1.8 hours of local-equivalent conversion, against

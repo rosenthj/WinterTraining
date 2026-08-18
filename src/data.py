@@ -207,7 +207,34 @@ def extract_data_from_game(g):
         count.repaired_abnormal += 1
     # The repair is the only reason a forfeited game is usable, so it must not be subject to
     # tb_relabel_prob -- those games always take every probe.
-    return data_from_fen_res_set(fens, res, force_tb=forfeit_board is not None)
+    out = data_from_fen_res_set(fens, res, force_tb=forfeit_board is not None)
+    return subsample_game(out)
+
+
+def subsample_game(out):
+    """Keep at most ``config.positions_per_game`` of one game's positions, chosen uniformly.
+
+    Applied to the *output* of data_from_fen_res_set rather than to the fens going into it,
+    which matters for the labels: that function threads the result backwards through the
+    game, so the Syzygy probe at the entry into the endgame overwrites the recorded result
+    and propagates to every earlier position. A position drawn before the walk would carry
+    the game's raw result and disagree with how the same position is labelled in training.
+    The full walk therefore always runs, and only the rows kept from it are subsampled.
+
+    Sampling from the positions the game yielded -- the quiet ones extract_fens_from_game
+    already selected -- and not uniformly over plies is likewise deliberate: it leaves the
+    per-position distribution identical to the training data's, changing only how many
+    positions each game contributes.
+    """
+    if out is None or not config.positions_per_game:
+        return out
+    features, results = out
+    n = features.shape[0]
+    if n <= config.positions_per_game:
+        return out
+    # Sorted so the kept rows stay in the order data_from_fen_res_set produced them.
+    idx = np.sort(np.random.choice(n, config.positions_per_game, replace=False))
+    return features[idx], results[idx]
 
 
 def gen_dataset_from_pgn(path="./../pgns/CCRL-404FRCv2.pgn"):

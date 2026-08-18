@@ -1,7 +1,9 @@
 import argparse
 import re
+import zlib
 
 import chess
+import numpy as np
 
 from data import gen_dataset_helper
 import config
@@ -36,6 +38,20 @@ def main():
                              "forfeits, whose recorded result is unrelated to the position and would "
                              "propagate backwards through every position sampled from the game. "
                              "Needed for desk_v303..v317; harmless but unnecessary on clean PGNs.")
+    parser.add_argument('--positions-per-game', type=int, default=0,
+                        help="Keep at most this many positions from each game, drawn uniformly "
+                             "from the positions it yielded; 0 (default) keeps all of them. "
+                             "Use 1 to build a validation set in which no two positions share "
+                             "a game, and so no two share a result -- a few hundred thousand "
+                             "such positions carry far more information than the same number "
+                             "drawn from a handful of games.")
+    parser.add_argument('--seed', type=int, default=None,
+                        help="Seed the position sampling, the horizontal/vertical flips and "
+                             "the tablebase relabel draws, making the dataset reproducible. "
+                             "Worth setting for a validation set, which may have to be "
+                             "regenerated identically later. The seed is combined with --name, "
+                             "so shards of one run stay independent of each other while each "
+                             "one reproduces on its own.")
     args = parser.parse_args()
 
     if not 0.0 <= args.tb_relabel_prob <= 1.0:
@@ -44,8 +60,21 @@ def main():
     # recognised as a revision of its base version.
     if args.out_suffix and not re.fullmatch(r'[a-z]+', args.out_suffix):
         parser.error(f"--out-suffix must be lowercase letters only, got {args.out_suffix!r}")
+    if args.positions_per_game < 0:
+        parser.error(f"--positions-per-game must be >= 0, got {args.positions_per_game}")
     config.tb_relabel_prob = args.tb_relabel_prob
     config.drop_abnormal = args.drop_abnormal
+    config.positions_per_game = args.positions_per_game
+
+    if args.seed is not None:
+        # Every draw in the conversion path goes through numpy's global RNG (data.py is the
+        # only module that samples), so one seed here fixes the whole run. Mixing --name in
+        # matters because the shards of a run are converted by identical commands differing
+        # only in that name: a bare seed would hand all of them the same stream, applying
+        # the same flip and the same relabel draw to the nth position of every shard.
+        seed = (args.seed + zlib.crc32(args.name.encode())) % 2**32
+        np.random.seed(seed)
+        print(f"Seeded numpy with {seed} (--seed {args.seed} combined with name {args.name!r})")
 
     # Relabelling everything from the tablebase is what currently masks a forfeited game's
     # inverted result in the endgame. Keeping game outcomes instead is only safe once those
