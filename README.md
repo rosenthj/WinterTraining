@@ -549,8 +549,8 @@ The standby queue caps a job at 4 hours, so a long training run is split into ch
   `--auto-resume`, every segment continues the previous one's weights and LR schedule (a
   no-op on the first segment, and on a segment cut short by the wall-clock limit it resumes
   from the last completed epoch).
-- **`submit_chain.sh`** — enqueues N segments as a dependency chain, each held until the
-  previous finishes:
+- **`submit_chain.sh`** — enqueues N segments as a single job array, throttled to one
+  running task at a time:
 
   ```bash
   ./submit_chain.sh <num_segments> <run_name> [train_net.py args...]
@@ -558,13 +558,21 @@ The standby queue caps a job at 4 hours, so a long training run is split into ch
   ./submit_chain.sh 6 baseline --datasets all --exclude vEnd --batch-size 256
   ```
 
-  Every segment after the first is submitted with `--dependency=afterany:<prev_jobid>`.
-  `afterany` (not `afterok`) is deliberate: a segment that hits the 4h limit or is preempted
-  exits non-zero, and the chain must continue anyway. The trade-off is that a genuinely broken
-  run also keeps marching — watch the first segment's log under `logs/`.
+  The array is submitted as `--array=1-N%1`, whose `%1` throttle is what makes the segments
+  run strictly one after another. Order across tasks is not guaranteed by SLURM, and nothing
+  depends on it: `--auto-resume` always loads the newest checkpoint, so whichever task starts
+  next continues from wherever the run got to. A task that hits the 4h limit, is preempted,
+  or dies exits non-zero and the array simply moves on — which is what makes the segmenting
+  work, at the price that a genuinely broken run also keeps marching, so watch the first
+  segment's log under `logs/`.
 
-Monitor with `squeue -u $USER --name=wintertrain`; cancel the whole chain with
-`scancel --name=wintertrain -u $USER`. Adjust the `#SBATCH` account/partition lines in
+  The job name is the run name, so each run is one line in `squeue` (`12345_[2-6%1]` queued
+  plus the running task) rather than N separately named jobs.
+
+Monitor with `squeue -u $USER --name=<run_name>`, or plain `squeue -u $USER` for every run at
+once. Logs land in `logs/<run_name>_<arrayjobid>_<segment>.out`. Cancel the whole run with
+`scancel <arrayjobid>`, or drop just the queued tail — letting the running segment finish —
+with `scancel <arrayjobid>_[2-N]`. Adjust the `#SBATCH` account/partition lines in
 `standby_train.sh` to match your allocation.
 
 ## The model currently used by the Winter engine
