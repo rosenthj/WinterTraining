@@ -346,10 +346,10 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
 
 
 def save(model, path=None, name=None, epoch=None, write_bin=None):
-    # The Winter-readable .bin is only kept for the _tmp checkpoint (the always-most-recent
+    # The Winter-readable net is only kept for the _tmp checkpoint (the always-most-recent
     # latest pointer, refreshed every flush) -- it's a convenience for loading into the engine.
-    # Per-epoch snapshots store only the .pt; a .bin for any of them can be regenerated later
-    # via model.serialize(). write_bin overrides this default when given.
+    # Per-epoch snapshots store only the .pt; a net for any of them can be regenerated later
+    # via model.serialize_quantized(). write_bin overrides this default when given.
     is_tmp = path is None and epoch is None
     if path is None:
         assert name is not None
@@ -359,7 +359,12 @@ def save(model, path=None, name=None, epoch=None, write_bin=None):
             path = f"../models/{name}/{name}_ep{epoch + 1}"
     torch.save(model.state_dict(), f"{path}.pt")
     if write_bin if write_bin is not None else is_tmp:
-        model.serialize(f"{path}.bin", verbose=1)
+        # Winter reads the quantized .qbin. serialize() is kept for the architectures
+        # that do not have a quantized exporter, and for anything wanting raw floats.
+        if hasattr(model, "serialize_quantized"):
+            model.serialize_quantized(f"{path}.qbin", verbose=1)
+        else:
+            model.serialize(f"{path}.bin", verbose=1)
 
 
 def train(model, train_loader, epochs, optimizer=None, lr=0.01, log_freq=100000, loss=F.mse_loss, initial_epoch=0,

@@ -564,6 +564,23 @@ class NetRelHD(nn.Module):
         with open(filename, "wb") as f:
             f.write(buffer)
 
+    def serialize_quantized(self, filename, verbose=0):
+        """Write the net in the 16 bit format Winter loads (see quantize.py).
+
+        Half the size of serialize(), and it carries the per dimension scales,
+        so the engine does not derive them at startup. Winter reads this format
+        only; serialize() is kept for anything that wants the raw float weights.
+        """
+        import quantize
+        blob = quantize.pack(
+            self.c1.weight, self.b1.data, self.out.weight, self.out.bias,
+            self.f1.weight, self.f1.bias, self.fout.weight,
+            d=self.d, fd=self.f1.out_features, num_inputs=self.f_dim)
+        if verbose >= 1:
+            print(f"Buffering quantized net ({len(blob)} bytes)")
+        with open(filename, "wb") as f:
+            f.write(blob)
+
 
 class CRNet(nn.Module):
     def __init__(self, d=8, rec=3, kernel_size=15, padding=7, activation=F.relu):
