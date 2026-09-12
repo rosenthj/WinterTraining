@@ -5,7 +5,6 @@ import re
 import numpy as np
 import scipy
 import torch
-import random
 
 from torch.utils.data import DataLoader, BatchSampler, RandomSampler, SequentialSampler
 
@@ -270,9 +269,13 @@ def load_from_multiple(lst, portion=1.0, save_dir="./"):
         r0 = np.load(label_filename)['arr_0']
 
         def random_subset(frac):
-            idx = np.arange(len(r0))
-            random.shuffle(idx)
-            keep = idx < int(frac * len(r0))
+            # A uniformly random subset of exactly int(frac * n) rows. np.random.permutation
+            # rather than random.shuffle: the latter is a Python-level Fisher-Yates over a
+            # numpy array, ~5s per 15M-row dataset against ~0.5s here -- and with
+            # --reload-every it is paid for every dataset of every epoch, which at 85
+            # datasets is ~7 minutes of each epoch spent shuffling index arrays.
+            n = len(r0)
+            keep = np.random.permutation(n) < int(frac * n)
             return f0[keep], r0[keep]
 
         if por < 1.0:

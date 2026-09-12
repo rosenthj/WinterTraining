@@ -814,9 +814,14 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
     # reuses it for the first epoch. total_steps is a pure function of total_epochs and the
     # (constant) per-epoch step count, so wsd_lr(global_step) resumes exactly.
     lr_schedule = None
+    # True when data_loader below is an unused fresh draw, so the first epoch trains on it
+    # instead of immediately discarding it for another. Without this, a WSD run with
+    # --reload-every pays two full reloads before its first batch of every segment.
+    loader_unused = False
     if wsd:
         if data_loader is None:
             data_loader = data_loader_fn()
+            loader_unused = data_loader_fn is not None
         steps_per_epoch = len(data_loader)
         total_steps = total_epochs * steps_per_epoch
         decay_steps = max(1, int(round(decay_frac * total_steps)))
@@ -883,8 +888,9 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                 log(f"\nLearning rate is {lr:g} (step {step})")
         # In resampling mode, draw a fresh random subset every reload_every epochs (and on
         # the first epoch of a (re)started run, where data_loader has not been built yet).
-        will_reload = data_loader_fn is not None and (data_loader is None
-                                                      or epoch % reload_every == 0)
+        will_reload = (data_loader_fn is not None and not loader_unused
+                       and (data_loader is None or epoch % reload_every == 0))
+        loader_unused = False
         # Don't start work that cannot finish. Stopping here leaves the checkpoint on the
         # boundary it already sits on, and costs nothing; pushing on would spend the rest of
         # the allocation on a data reload, or on batches, that the wall clock then discards.
@@ -907,6 +913,12 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                 return
         if will_reload:
             reload_t0 = time.perf_counter()
+            # Drop the previous draw *before* building the next one. Holding the name while
+            # data_loader_fn() runs keeps the old subset alive through the new one's
+            # construction, so peak memory is the two draws plus vstack's copy rather than
+            # one draw plus the copy -- the difference between fitting in --mem and not, at a
+            # large --portion.
+            data_loader = None
             data_loader = data_loader_fn()
             last_reload_secs = time.perf_counter() - reload_t0
             log(f"Drew a fresh training subset in {last_reload_secs:.0f}s")
