@@ -3,6 +3,7 @@ import glob
 import math
 import numpy as np
 import os
+import signal
 import time
 import torch
 import torch.nn.functional as F
@@ -231,10 +232,25 @@ def _grad_norm(model):
 
 def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positions=False, base_loss=F.mse_loss,
                 test_loader=None, name=None, writer=None, global_step=0, lr=None, clip_grad_norm=None,
-                ce_weight=0.04, draw_weight=0.0, lr_schedule=None):
-    # ``lr_schedule``: optional callable global_step -> lr. When given, the LR is set per batch
-    # from the current global_step (used by the WSD schedule for step-granular warmup/decay);
-    # when None, the fixed ``lr`` set by the caller is used for the whole epoch (legacy behaviour).
+                ce_weight=0.04, draw_weight=0.0, lr_schedule=None, max_batches=None, budget=None,
+                checkpoint_fn=None):
+    """Train for one pass (or ``max_batches`` batches) and return
+    ``(avg_loss, global_step, batches_trained, stop_reason)``.
+
+    ``lr_schedule``: optional callable global_step -> lr. When given, the LR is set per batch
+    from the current global_step (used by the WSD schedule for step-granular warmup/decay);
+    when None, the fixed ``lr`` set by the caller is used for the whole epoch (legacy behaviour).
+
+    ``max_batches`` caps the pass, which is how a partial epoch is resumed: a job that died
+    partway through epoch N runs only the batches N had left.
+
+    ``budget`` (a :class:`SegmentBudget`) and ``checkpoint_fn`` make the pass interruptible.
+    Both are polled between optimizer steps -- the only point at which the weights, the
+    optimizer state and the step counters all describe the same position in the epoch -- so
+    ``checkpoint_fn(batches_trained, global_step)`` always captures a consistent point.
+    ``stop_reason`` is non-None when the pass ended because the budget said to stop rather
+    than because the data (or ``max_batches``) ran out.
+    """
     model.train()
     # Running sums of [total, reg, ce, draw] kept on-device so we only synchronise (.item()) once
     # per log_freq batches instead of every batch -- cheaper than the previous per-batch
@@ -307,7 +323,10 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         recent_positions = 0
         recent_t0 = time.perf_counter()
 
+    stop_reason = None
     for (data, target) in train_loader:
+        if max_batches is not None and count >= max_batches:
+            break
         # data = randomize_piece_positions(data, rng_piece_positions)
         if lr_schedule is not None:
             # Per-step LR (warmup/stable/decay). Reassigning the local ``lr`` also updates what
@@ -340,9 +359,18 @@ def train_epoch(model, optimizer, train_loader, log_freq=1000, rng_piece_positio
         global_step += 1
         if count % log_freq == 0:
             flush(include_val=True)
+        # Between steps: take a periodic checkpoint, and stop here if the job is ending.
+        if budget is not None:
+            stop_reason = budget.stop_reason()
+            if stop_reason is not None or budget.due_for_checkpoint():
+                if checkpoint_fn is not None:
+                    checkpoint_fn(count, global_step)
+                budget.mark_checkpoint()
+            if stop_reason is not None:
+                break
     flush(include_val=False)  # capture the tail of the epoch (no extra validation pass)
     avg_loss = (epoch_sums[0] / count).item() if count else 0.0
-    return avg_loss, global_step
+    return avg_loss, global_step, count, stop_reason
 
 
 def save(model, path=None, name=None, epoch=None, write_bin=None):
@@ -394,15 +422,126 @@ class OutputHook(list):
         self.append(output)
 
 
+def resolve_deadline(max_seconds=None):
+    """Return the unix time at which this job's allocation ends, or None if unknown.
+
+    Prefers SLURM's own ``SLURM_JOB_END_TIME`` (exported for every job, array tasks
+    included) so nothing has to be kept in sync with the ``#SBATCH --time`` line. A
+    ``max_seconds`` budget, when given, wins: it is the explicit override for running
+    outside SLURM or on a version that does not export the end time.
+    """
+    if max_seconds is not None and max_seconds > 0:
+        return time.time() + max_seconds
+    raw = os.environ.get("SLURM_JOB_END_TIME")
+    if not raw:
+        return None
+    try:
+        end = float(raw)
+    except ValueError:
+        log(f"Ignoring unparseable SLURM_JOB_END_TIME={raw!r}; no wall-clock deadline.")
+        return None
+    if end <= time.time():
+        log(f"Ignoring SLURM_JOB_END_TIME={raw!r} (not in the future); no wall-clock deadline.")
+        return None
+    return end
+
+
+class SegmentBudget:
+    """Decides when a training segment should checkpoint, and when it should stop.
+
+    One object answers both questions the batch loop polls, because they are two halves of
+    the same problem -- a run split into preemptable ~4h segments loses whatever work sits
+    between the last checkpoint and the segment's death:
+
+    - *Announced* deaths (the wall-clock limit approaching, or a SIGTERM from a preemption's
+      grace period / a ``--signal`` request) set the stop flag, and the loop checkpoints and
+      exits cleanly at the next batch boundary. Cost: one batch.
+    - *Unannounced* deaths (a preemption that outruns its grace period, a node failure)
+      can't be caught at all, so ``checkpoint_every_mins`` bounds what they destroy.
+
+    The deadline is authoritative and needs no cooperation from the scheduler; signals are
+    the belt-and-braces path for when a job ends early or ``--signal`` delivery differs
+    between SLURM configurations.
+    """
+
+    def __init__(self, deadline=None, reserve_seconds=120.0, checkpoint_every_mins=10.0):
+        self.deadline = deadline
+        self.reserve_seconds = max(0.0, reserve_seconds)
+        self.checkpoint_every = max(0.0, checkpoint_every_mins) * 60.0
+        self.signalled = None
+        self._last_checkpoint = time.monotonic()
+
+    def install_signal_handlers(self):
+        # SIGINT is deliberately left alone so Ctrl-C keeps aborting immediately.
+        for sig in (signal.SIGTERM, signal.SIGUSR1):
+            try:
+                signal.signal(sig, self._handle)
+            except (ValueError, OSError) as e:  # non-main thread, or unsupported platform
+                log(f"Could not install a {sig.name} handler ({e}); "
+                    "relying on the wall-clock deadline alone.")
+        return self
+
+    def _handle(self, signum, frame):
+        # Record the request only. Checkpointing from a signal handler could land in the
+        # middle of a backward pass or of another torch.save; the loop picks this up at the
+        # next batch boundary instead.
+        if self.signalled is None:
+            self.signalled = signal.Signals(signum).name
+
+    def seconds_left(self):
+        return None if self.deadline is None else self.deadline - time.time()
+
+    def stop_reason(self):
+        """A short description of why training should stop now, or None to keep going."""
+        if self.signalled is not None:
+            return f"received {self.signalled}"
+        left = self.seconds_left()
+        if left is not None and left <= self.reserve_seconds:
+            return f"wall-clock limit in {max(0.0, left):.0f}s"
+        return None
+
+    def due_for_checkpoint(self):
+        return (self.checkpoint_every > 0
+                and time.monotonic() - self._last_checkpoint >= self.checkpoint_every)
+
+    def mark_checkpoint(self):
+        self._last_checkpoint = time.monotonic()
+
+    def describe(self):
+        left = self.seconds_left()
+        when = "no wall-clock deadline" if left is None else f"{left / 60:.1f} min of wall clock left"
+        cadence = ("mid-epoch checkpointing off" if self.checkpoint_every <= 0
+                   else f"checkpointing every {self.checkpoint_every / 60:g} min")
+        return (f"{when}, stopping {self.reserve_seconds:g}s before it, {cadence}")
+
+
 def training_state_path(name):
     return f"../models/{name}/{name}.state.pt"
 
 
-def save_training_state(name, optimizer, next_epoch, step, global_step=0):
-    """Persist the schedule position and optimizer state so a later job can resume."""
-    torch.save({"next_epoch": next_epoch, "step": step, "global_step": global_step,
-                "optimizer": optimizer.state_dict()},
-               training_state_path(name))
+def save_training_state(name, optimizer, next_epoch, step, global_step=0, model=None,
+                        batches_done=0, steps_per_epoch=None):
+    """Persist everything a later job needs to resume, as one atomic file.
+
+    The model weights go in this file too (``model``), so a resume reads a single mutually
+    consistent object -- weights, optimizer momentum, schedule position, and the offset
+    *within* the epoch. ``batches_done`` is 0 at an epoch boundary and the number of batches
+    of epoch ``next_epoch`` already trained when the checkpoint was taken mid-epoch;
+    ``steps_per_epoch`` records how long that epoch is, so the resume knows what is left.
+
+    Written to a sibling temp path and moved into place with ``os.replace``, so a job killed
+    during the write leaves the previous checkpoint intact instead of a truncated file --
+    the difference between losing one checkpoint interval and losing the whole run.
+    """
+    state = {"next_epoch": next_epoch, "step": step, "global_step": global_step,
+             "batches_done": batches_done, "steps_per_epoch": steps_per_epoch,
+             "optimizer": optimizer.state_dict()}
+    if model is not None:
+        state["model"] = model.state_dict()
+    path = training_state_path(name)
+    tmp = f"{path}.writing"
+    torch.save(state, tmp)
+    os.replace(tmp, path)
 
 
 def load_training_state(name):
@@ -417,10 +556,40 @@ def latest_checkpoint(name):
     """Return the most recently modified weight checkpoint (.pt) for ``name``, or None.
 
     Matches ``{name}_*.pt`` (e.g. ``{name}_ep3.pt``, ``{name}_tmp.pt``) but not the
-    ``{name}.state.pt`` schedule file.
+    ``{name}.state.pt`` schedule file. Prefer :func:`load_resume_state` for resuming: the
+    newest file by mtime is not necessarily the one the saved schedule state describes.
     """
     paths = glob.glob(f"../models/{name}/{name}_*.pt")
     return max(paths, key=os.path.getmtime) if paths else None
+
+
+def load_resume_state(name):
+    """Return ``(weights, state)`` to resume run ``name`` from; either may be None.
+
+    ``weights`` is a model state_dict and ``state`` the schedule/optimizer state that
+    belongs with it. Checkpoints written by the current code carry the weights inside the
+    state file, so the pair is consistent by construction.
+
+    For a run whose state file predates that, the weights are taken from the per-epoch
+    snapshot the state file names (``_ep{next_epoch}.pt``) rather than from the newest file
+    on disk: ``_tmp.pt`` is refreshed mid-epoch by the logging flush, so choosing by mtime
+    could pair mid-epoch weights with an epoch-boundary optimizer and ``global_step``.
+    """
+    state = load_training_state(name)
+    if state is not None and state.get("model") is not None:
+        log(f"Resume: weights + optimizer from {training_state_path(name)}")
+        return state.pop("model"), state
+    if state is not None:
+        snapshot = f"../models/{name}/{name}_ep{state.get('next_epoch', 0)}.pt"
+        if os.path.exists(snapshot):
+            log(f"Resume: weights from {snapshot} (pre-combined state file)")
+            return torch.load(snapshot, map_location="cpu"), state
+        log(f"Resume: {snapshot} is missing; falling back to the newest checkpoint.")
+    ckpt = latest_checkpoint(name)
+    if ckpt is None:
+        return None, state
+    log(f"Resume: weights from {ckpt}")
+    return torch.load(ckpt, map_location="cpu"), state
 
 
 def _copy_overlap(dst, src, blocks=None):
@@ -565,7 +734,8 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                        data_loader_fn=None, reload_every=0, optimizer_name="sgd", momentum=0.9,
                        weight_decay=0.0, persistent_optimizer=False,
                        clip_grad_norm=None, reg_weights_only=False, ce_weight=0.04, draw_weight=0.0,
-                       schedule="step", total_epochs=None, warmup_steps=0, decay_frac=0.1):
+                       schedule="step", total_epochs=None, warmup_steps=0, decay_frac=0.1,
+                       budget=None):
     """Train with a learning-rate schedule.
 
     ``schedule`` selects the LR shape:
@@ -583,6 +753,14 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
     ``reload_every`` epochs. Resampling keeps only a subset of the corpus resident at once
     (see ``loader.load_from_multiple``'s ``portion``) while still covering all of it over
     time -- this is the memory-bounded streaming used for the full dataset.
+
+    ``budget`` (a :class:`SegmentBudget`) makes the run interruptible at batch granularity
+    rather than epoch granularity: it checkpoints periodically mid-epoch and, when the job's
+    wall clock is nearly up or a stop signal arrives, saves and returns instead of being
+    killed partway through an epoch. The next segment resumes the interrupted epoch from the
+    batch it stopped on, so a segment boundary costs a checkpoint interval at worst instead
+    of every batch since the last epoch boundary. Without a ``budget`` the behaviour is the
+    old one: checkpoints at epoch boundaries only.
     """
     assert schedule in ("step", "wsd"), f"Unknown schedule '{schedule}' (expected 'step' or 'wsd')"
     wsd = schedule == "wsd"
@@ -603,12 +781,22 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
     global_step = 0
     pending_opt_state = None
     pending_opt_step = None
+    # Offset into the epoch we are resuming: 0 when the last checkpoint fell on an epoch
+    # boundary, otherwise the number of batches of epoch start_epoch already trained.
+    batches_done = 0
+    resume_steps_per_epoch = None
+    steps_per_epoch = None
     if resume_state is not None:
         start_epoch = resume_state.get("next_epoch", 0)
         global_step = resume_state.get("global_step", 0)
         pending_opt_state = resume_state.get("optimizer")
         pending_opt_step = resume_state.get("step")
-        log(f"Resuming schedule at epoch {start_epoch + 1} (global_step {global_step})")
+        batches_done = resume_state.get("batches_done") or 0
+        resume_steps_per_epoch = resume_state.get("steps_per_epoch")
+        partway = f", {batches_done} batches into it" if batches_done else ""
+        log(f"Resuming schedule at epoch {start_epoch + 1} (global_step {global_step}){partway}")
+    if budget is not None:
+        log(f"Segment budget: {budget.describe()}")
 
     # The start-position eval is a cheap, interpretable sanity metric: the network's
     # predicted expected score / WDL for the opening position, which should settle near a
@@ -640,6 +828,9 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
     epoch = start_epoch
     optimizer = None
     cur_step = None
+    # How long the last --reload-every draw took, so the loop can decline to start one it
+    # hasn't time to finish (a reload of the full corpus is minutes of the allocation).
+    last_reload_secs = None
     while True:
         if wsd:
             # Fixed-budget run; the LR is set per batch inside train_epoch from lr_schedule.
@@ -692,20 +883,88 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
                 log(f"\nLearning rate is {lr:g} (step {step})")
         # In resampling mode, draw a fresh random subset every reload_every epochs (and on
         # the first epoch of a (re)started run, where data_loader has not been built yet).
-        if data_loader_fn is not None and (data_loader is None or epoch % reload_every == 0):
+        will_reload = data_loader_fn is not None and (data_loader is None
+                                                      or epoch % reload_every == 0)
+        # Don't start work that cannot finish. Stopping here leaves the checkpoint on the
+        # boundary it already sits on, and costs nothing; pushing on would spend the rest of
+        # the allocation on a data reload, or on batches, that the wall clock then discards.
+        if budget is not None:
+            reason = budget.stop_reason()
+            if reason is None and will_reload and last_reload_secs is not None:
+                left = budget.seconds_left()
+                if left is not None and left < last_reload_secs + budget.reserve_seconds:
+                    reason = (f"{left / 60:.1f} min left, less than the "
+                              f"{last_reload_secs / 60:.1f} min a data reload costs")
+            if reason is not None:
+                # batches_done is still whatever this epoch was resumed at (0 at a boundary),
+                # and resume_steps_per_epoch the epoch length that went with it.
+                save_training_state(config.name, optimizer, next_epoch=epoch, step=step,
+                                    global_step=global_step, model=model,
+                                    batches_done=batches_done,
+                                    steps_per_epoch=resume_steps_per_epoch)
+                log(f"Stopping before epoch {epoch + 1} ({reason}). "
+                    "Checkpoint written; resume to continue.")
+                return
+        if will_reload:
+            reload_t0 = time.perf_counter()
             data_loader = data_loader_fn()
+            last_reload_secs = time.perf_counter() - reload_t0
+            log(f"Drew a fresh training subset in {last_reload_secs:.0f}s")
+        # An epoch is a *budget of batches*, not one specific enumeration of rows. When
+        # batches_done > 0 the previous segment was interrupted partway through this epoch,
+        # so only the remainder is trained now, drawn from a freshly shuffled loader. For
+        # this data that is equivalent to finishing the interrupted pass -- the sampler
+        # reshuffles every epoch anyway, and with --reload-every the subset is redrawn from
+        # the corpus too -- while keeping the cost of epoch N at exactly epoch_steps batches
+        # however often it is cut. That invariant is what keeps the WSD horizon
+        # (total_epochs * steps_per_epoch) exact across interruptions.
+        if resume_steps_per_epoch:
+            epoch_steps = resume_steps_per_epoch
+            resume_steps_per_epoch = None
+        elif wsd:
+            epoch_steps = steps_per_epoch  # the length the schedule's horizon was sized from
+        else:
+            epoch_steps = len(data_loader)
+        remaining = max(0, epoch_steps - batches_done)
         log(f"Epoch {epoch + 1}--Training on {len(data_loader.dataset)} samples"
             "----------------------------------------------------")
+        if batches_done:
+            log(f"Continuing epoch {epoch + 1} at batch {batches_done}/{epoch_steps} "
+                f"({remaining} to go)")
+
+        def checkpoint_fn(trained_now, gs, _epoch=epoch, _step=step, _base=batches_done,
+                          _epoch_steps=epoch_steps):
+            # Mid-epoch: the schedule position is still epoch _epoch, with _base+trained_now
+            # of its batches behind us. Defaults bind the loop's current values.
+            save_training_state(config.name, optimizer, next_epoch=_epoch, step=_step,
+                                global_step=gs, model=model,
+                                batches_done=_base + trained_now, steps_per_epoch=_epoch_steps)
+
         # lr is logged densely inside train_epoch (at each log point + epoch end) so the
         # train/lr curve reads as a step function instead of an interpolated ramp. In WSD mode
         # lr_schedule overrides it per batch (step-granular warmup/decay).
-        _, global_step = train_epoch(model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
-                                     test_loader=val_loader, name=config.name, writer=writer,
-                                     global_step=global_step, lr=lr, clip_grad_norm=clip_grad_norm,
-                                     ce_weight=ce_weight, draw_weight=draw_weight, lr_schedule=lr_schedule)
+        _, global_step, trained, stop_reason = train_epoch(
+            model, optimizer, data_loader, log_freq=log_freq, base_loss=loss,
+            test_loader=val_loader, name=config.name, writer=writer,
+            global_step=global_step, lr=lr, clip_grad_norm=clip_grad_norm,
+            ce_weight=ce_weight, draw_weight=draw_weight, lr_schedule=lr_schedule,
+            max_batches=remaining, budget=budget, checkpoint_fn=checkpoint_fn)
+
+        if stop_reason is not None and trained < remaining:
+            # Interrupted mid-epoch. train_epoch checkpointed at the batch it stopped on, so
+            # the next segment picks this epoch up from there; returning here skips the
+            # per-epoch snapshot and validation, which belong to completed epochs only.
+            log(f"Stopping {batches_done + trained}/{epoch_steps} batches into epoch "
+                f"{epoch + 1} ({stop_reason}). Checkpoint written; resume to continue.")
+            return
+        batches_done = 0
         epoch += 1
         save(model, f"../models/{config.name}/{config.name}_ep{epoch}")
-        save_training_state(config.name, optimizer, next_epoch=epoch, step=step, global_step=global_step)
+        save_training_state(config.name, optimizer, next_epoch=epoch, step=step,
+                            global_step=global_step, model=model, batches_done=0,
+                            steps_per_epoch=epoch_steps)
+        if budget is not None:
+            budget.mark_checkpoint()
         if val_loader is not None:
             val_losses, val_acc, val_w1, act_stats = test(model, val_loader, base_loss=[F.mse_loss, F.l1_loss],
                                                           return_accuracy=True, return_wasserstein=True,
@@ -730,6 +989,10 @@ def scheduled_lr_train(model, data_loader=None, val_loader=None, loss=F.mse_loss
             except Exception as e:
                 log(f"start-position eval failed, disabling: {e}")
                 startpos_eval = None
+        if stop_reason is not None:
+            log(f"Stopping after epoch {epoch} ({stop_reason}). "
+                "Checkpoint written; resume to continue.")
+            return
 
 
 def train_v2(model, data_lst, portion, iters, val_loader=None, loss=F.mse_loss, init_lr=0.001, min_lr=0.0001, lr_mult=0.5,

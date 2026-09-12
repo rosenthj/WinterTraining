@@ -9,8 +9,8 @@ import config
 from loader import (discover_dataset_tags, select_dataset_tags, load_from_multiple,
                     load_features_results, make_scatter_loader)
 from model import NetRel, NetRelH, NetRelHD
-from train import (scheduled_lr_train, latest_checkpoint, load_training_state,
-                   load_partial_state_dict)
+from train import (scheduled_lr_train, load_resume_state, load_partial_state_dict,
+                   SegmentBudget, resolve_deadline)
 
 
 # Model name -> (class, accepts_fd). Add new architectures here to expose them on the CLI.
@@ -144,6 +144,23 @@ def parse_args():
     parser.add_argument('--decay-frac', type=float, default=0.1,
                         help="wsd: fraction of the total run spent in the final cosine decay to "
                              "--min-lr (e.g. 0.1 = last 10%%). The rest (after warmup) is stable.")
+    parser.add_argument('--checkpoint-every-mins', type=float, default=10.0,
+                        help="Write a full checkpoint (weights + optimizer + position inside "
+                             "the epoch) this often, instead of only at epoch boundaries. "
+                             "Bounds what an unannounced death costs -- a preemption that "
+                             "outruns its grace period, a node failure -- to this much work "
+                             "rather than the whole epoch in progress. 0 disables it.")
+    parser.add_argument('--stop-margin-secs', type=float, default=120.0,
+                        help="Stop and checkpoint this many seconds before the job's "
+                             "wall-clock end, so the segment exits cleanly mid-epoch instead "
+                             "of being killed and losing the batches since the last "
+                             "checkpoint. The end time comes from SLURM_JOB_END_TIME or "
+                             "--max-seconds; with neither, only the periodic checkpoints and "
+                             "stop signals apply.")
+    parser.add_argument('--max-seconds', type=float, default=None,
+                        help="Wall-clock budget for this process, for when SLURM_JOB_END_TIME "
+                             "is unavailable or when running outside SLURM. Takes precedence "
+                             "over the environment.")
     parser.add_argument('--log-freq', type=int, default=100000)
     parser.add_argument('--device', type=int, default=0, help="CUDA device index")
     parser.add_argument('--no-cuda', action='store_true', default=False, help="Force CPU training")
@@ -268,12 +285,14 @@ def main():
 
     resume_state = None
     if args.auto_resume:
-        ckpt = latest_checkpoint(args.name)
-        if ckpt:
+        # load_resume_state pairs the weights with the schedule/optimizer state they were
+        # saved alongside (and logs which file they came from), so a mid-epoch checkpoint
+        # resumes as one consistent point rather than whichever .pt is newest on disk.
+        weights, resume_state = load_resume_state(args.name)
+        if weights is not None:
             # A resumed run continues at its own size; never partial-load a checkpoint.
-            model.load_state_dict(torch.load(ckpt, map_location="cpu"))
-            resume_state = load_training_state(args.name)
-            print(f"Resuming run '{args.name}': loaded weights from {ckpt}")
+            model.load_state_dict(weights)
+            print(f"Resuming run '{args.name}'")
         elif args.init_from:
             seed_from(args.init_from)
             print(f"Fine-tuning: initialized run '{args.name}' from {args.init_from}")
@@ -286,6 +305,13 @@ def main():
         seed_from(args.load)
         print(f"Loaded weights from {args.load}")
     model.to(config.device)
+
+    # Makes the run interruptible at batch granularity: periodic mid-epoch checkpoints plus
+    # a clean checkpoint-and-exit when the job's wall clock runs out or a stop signal lands.
+    budget = SegmentBudget(deadline=resolve_deadline(args.max_seconds),
+                           reserve_seconds=args.stop_margin_secs,
+                           checkpoint_every_mins=args.checkpoint_every_mins)
+    budget.install_signal_handlers()
 
     writer = make_writer(args)
     try:
@@ -301,7 +327,7 @@ def main():
                            reg_weights_only=args.reg_weights_only, ce_weight=args.ce_weight,
                            draw_weight=args.draw_weight, schedule=args.schedule,
                            total_epochs=args.total_epochs, warmup_steps=args.warmup_steps,
-                           decay_frac=args.decay_frac)
+                           decay_frac=args.decay_frac, budget=budget)
     finally:
         if writer is not None:
             writer.close()

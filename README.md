@@ -478,21 +478,31 @@ should keep improving through the stable phase and drop further during the decay
 
 ### Resuming a run
 
-`scheduled_lr_train` computes the learning rate from a schedule (`step` or `wsd`, above) and after
-every epoch saves:
+`scheduled_lr_train` computes the learning rate from a schedule (`step` or `wsd`, above) and
+writes two kinds of file under `../models/{name}/`:
 
-- `../models/{name}/{name}_ep{N}.pt` and `_tmp.pt` — model weights, and
-- `../models/{name}/{name}.state.pt` — the schedule position (next epoch, step, and
-  `global_step`) and optimizer state.
+- **`{name}.state.pt`** — the resume point, written every `--checkpoint-every-mins` (default 10)
+  and at every epoch boundary. It holds the model weights, the optimizer state, the schedule
+  position (`next_epoch`, `step`, `global_step`) **and the offset inside the epoch**
+  (`batches_done`, `steps_per_epoch`). One file, so a resume always reads a mutually consistent
+  point; written to a temp path and `os.replace`d into place, so a job killed during the write
+  leaves the previous checkpoint intact rather than a truncated one.
+- **`{name}_ep{N}.pt`** (per completed epoch) and **`{name}_tmp.pt`** / **`_tmp.qbin`** (refreshed
+  at every log flush) — snapshots for evaluation and for loading into the engine. Not the resume
+  path.
 
-Passing `--auto-resume` to `train_net.py` reloads the newest checkpoint **and** that schedule
-state, so training continues exactly where it stopped (correct LR, epoch, and optimizer
-momentum) instead of restarting the schedule. Both schedules resume bit-for-bit: `step` LR is a
-function of the epoch, and `wsd` LR is a function of the persisted `global_step`, so a run cut off
-by the wall-clock and resumed reproduces the uninterrupted run (verified). For `wsd`, pass the
-**same `--total-epochs`** to every segment — it defines the schedule's horizon, so changing it
-between segments reshapes the (already-traversed) curve. Resuming an already-finished run is a
-no-op. (`--load <path>` remains a one-off weight load that does *not* resume the schedule.)
+Passing `--auto-resume` to `train_net.py` reloads that state, so training continues exactly where
+it stopped — correct LR, epoch, optimizer momentum, and position *within* the epoch. For `wsd`,
+pass the **same `--total-epochs`** to every segment: it defines the schedule's horizon, so
+changing it between segments reshapes the (already-traversed) curve. Resuming an already-finished
+run is a no-op. (`--load <path>` remains a one-off weight load that does *not* resume the
+schedule.)
+
+The LR is exact across any number of interruptions — `step` LR is a function of the epoch, `wsd`
+LR of the persisted `global_step` — and an epoch always costs exactly `steps_per_epoch` batches
+however many times it is cut, so the WSD horizon (`total_epochs × steps_per_epoch`) does not
+drift. What a mid-epoch resume does *not* reproduce is the exact sequence of rows: see
+[Surviving the 4-hour limit](#surviving-the-4-hour-limit) below.
 
 ### Fine-tuning / retraining from an existing model (`--init-from`)
 
@@ -539,6 +549,38 @@ does not carry over and the added units need to train up. `--auto-resume` never 
 once the run has its own checkpoints they continue at the grown size as usual, so `--init-partial`
 composes with the segment chain exactly like `--init-from`.
 
+### Surviving the 4-hour limit
+
+A run is split into ~4h segments (below), and the problem with checkpointing only at epoch
+boundaries is that the segment almost never ends on one. Every batch trained since the last
+boundary is discarded when the wall clock hits, so at an epoch length of `E` a segment loses
+about `E/2` on average — and much more when `E` does not divide the window, e.g. at `E ≈ 2h`
+you keep one epoch out of a nearly-four-hour allocation.
+
+So the resume point is a *batch*, not an epoch:
+
+- **`--checkpoint-every-mins N`** (default 10) writes a full mid-epoch checkpoint every `N`
+  minutes. This is what bounds the damage from a death with no warning — a standby preemption
+  that outruns its grace period, a node failure. The checkpoint is a few MB, so the cadence is
+  effectively free and a smaller `N` is fine.
+- **`--stop-margin-secs S`** (default 120) makes the trainer stop *deliberately*. It reads
+  `SLURM_JOB_END_TIME` and, `S` seconds before it, checkpoints at the next batch boundary and
+  exits 0 instead of being killed mid-batch. Outside SLURM (or on a version that does not export
+  the end time) give it **`--max-seconds`** instead; with neither, only the periodic checkpoints
+  apply. A `SIGUSR1` (requested by `standby_train.sh`'s `--signal=USR1@180`) or the `SIGTERM`
+  from a preemption's grace period triggers the same clean stop.
+
+A resumed segment trains only the batches its epoch had left. It draws them from a freshly
+shuffled loader rather than replaying the interrupted pass's exact rows, which for this data is
+equivalent — the sampler reshuffles every epoch anyway, and with `--reload-every` the subset is
+redrawn from the corpus too — while keeping the epoch's cost at exactly `steps_per_epoch`
+batches. So an interrupted run matches an uninterrupted one in LR schedule, epoch accounting and
+total batches, but not row-for-row. (Bit-exact replay would additionally need the sampler
+permutation and a seed for `load_from_multiple`'s subset draw persisted.)
+
+What is still paid once per segment, and is not addressed here, is startup: each segment re-reads
+its `--portion` of a ~6.5 GB `.npz` corpus before the first batch.
+
 ## Running on a batch cluster (SLURM)
 
 The standby queue caps a job at 4 hours, so a long training run is split into chained
@@ -547,8 +589,11 @@ The standby queue caps a job at 4 hours, so a long training run is split into ch
 - **`standby_train.sh`** — a single SLURM segment. It activates the conda env, `cd`s into
   `src/`, and runs `train_net.py --name <run> --auto-resume <your args>`. Because of
   `--auto-resume`, every segment continues the previous one's weights and LR schedule (a
-  no-op on the first segment, and on a segment cut short by the wall-clock limit it resumes
-  from the last completed epoch).
+  no-op on the first segment). A segment cut short by the wall-clock limit or by preemption
+  resumes from the batch it stopped on, not from the last completed epoch — see
+  [Surviving the 4-hour limit](#surviving-the-4-hour-limit). Its `--signal=USR1@180` asks SLURM
+  to warn the trainer three minutes before the limit, as a backup for the trainer's own
+  deadline check.
 - **`submit_chain.sh`** — enqueues N segments as a single job array, throttled to one
   running task at a time:
 
@@ -562,9 +607,11 @@ The standby queue caps a job at 4 hours, so a long training run is split into ch
   run strictly one after another. Order across tasks is not guaranteed by SLURM, and nothing
   depends on it: `--auto-resume` always loads the newest checkpoint, so whichever task starts
   next continues from wherever the run got to. A task that hits the 4h limit, is preempted,
-  or dies exits non-zero and the array simply moves on — which is what makes the segmenting
-  work, at the price that a genuinely broken run also keeps marching, so watch the first
-  segment's log under `logs/`.
+  or dies simply hands over to the next one — which is what makes the segmenting work, at the
+  price that a genuinely broken run also keeps marching, so watch the first segment's log under
+  `logs/`. (A segment that stops on its own deadline exits 0; one that is killed or crashes
+  exits non-zero. Either way the array moves on, so the exit code is a signal for you, not for
+  SLURM.)
 
   The job name is the run name, so each run is one line in `squeue` (`12345_[2-6%1]` queued
   plus the running task) rather than N separately named jobs.
