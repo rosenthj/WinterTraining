@@ -9,6 +9,14 @@ The scales are derived here rather than in the engine so that the net file
 carries them, but they are a pure function of the weights: no positions and no
 calibration data are involved. The engine recomputes the same bounds in its
 tests and asserts that the stored scales are safe.
+
+The one exception is the pooled head of NetRelHDP (format version 2). Its
+inputs are the per lane sums of the piece output head, and the bound provable
+from the weights is about a hundred times larger than anything seen in play,
+which would waste most of their 16 bits. Their scales are therefore calibrated
+on positions, with a margin, and the engine saturates rather than wraps when a
+lane exceeds its range. Everything that could overflow, including the 32 bit
+accumulation of the head's hidden layer, is still bounded from the weights.
 """
 
 import numpy as np
@@ -16,6 +24,7 @@ import numpy as np
 
 MAGIC = b"WNET"
 FORMAT_VERSION = 1
+POOLED_FORMAT_VERSION = 2
 FLAG_QUANTIZED = 1
 
 MAX_INT16 = 32767
@@ -32,6 +41,9 @@ MAX_PIECES = 32
 MAX_PIECE_COUNT = (8, 10, 10, 10, 10, 1)
 MAX_NON_KING = 15
 MAX_CANDIDATES = 10
+
+# Headroom of the pooled head's input range over the largest lane seen in calibration.
+CALIBRATION_MARGIN = 4.0
 
 
 def _as_array(x):
@@ -205,7 +217,7 @@ def _quantize(values, scales, name):
 
 
 def pack(c1_weight, b1, out_weight, out_bias, f1_weight, f1_bias, fout_weight,
-         d, fd, num_inputs):
+         d, fd, num_inputs, head=None):
     """Serialize a net to Winter's quantized format.
 
     The layout follows the float format, except that the bias of the piece
@@ -213,6 +225,11 @@ def pack(c1_weight, b1, out_weight, out_bias, f1_weight, f1_bias, fout_weight,
     bias moves into the header because it is the one value the engine still
     applies in float. Only the unmirrored half of every tensor is stored, the
     engine builds the mirror at load time.
+
+    ``head`` adds NetRelHDP's pooled head and makes this a version 2 file (see
+    ``pooled_head``): a dict of ``p1_weight``, ``p1_bias``, ``pout_weight`` and
+    ``z_max``, the largest |lane| per (outcome, lane) seen in calibration, in
+    logits. Without it the file is version 1, byte for byte as before.
     """
     W, B, OW, MOW, FL, FLB, FO, MFO = engine_tensors(
         c1_weight, b1, out_weight, f1_weight, f1_bias, fout_weight, d, fd)
@@ -253,18 +270,79 @@ def pack(c1_weight, b1, out_weight, out_bias, f1_weight, f1_bias, fout_weight,
                   (scale / np.tile(full_scale, 2))[None, :], "fout.weight"),
     ]
 
+    version = FORMAT_VERSION
+    if head is not None:
+        version = POOLED_FORMAT_VERSION
+        shifts = z_shifts(head["z_max"], scale)
+        p1_q, p1_b, p1_exp = pooled_head(head["p1_weight"], head["p1_bias"], shifts, scale,
+                                         full_scale, d)
+        payload.append(p1_q)
+
     header = bytearray(MAGIC)
-    header += np.array([FORMAT_VERSION, 0, FLAG_QUANTIZED, d, fd, num_inputs,
+    header += np.array([version, 0, FLAG_QUANTIZED, d, fd, num_inputs,
                         NUM_PIECE_TYPES, GRID, NUM_OUTPUTS], "<u4").tobytes()
     header += np.array([scale, RELU_BOUND], "<f4").tobytes()
     header += piece_scale.astype("<i4").tobytes()
     header += full_scale.astype("<i4").tobytes()
     header += _as_array(out_bias).reshape(NUM_OUTPUTS).astype("<f4").tobytes()
+    if head is not None:
+        # Version 2 appends: pd, the lane shifts of the first half (the mirror half
+        # uses the same), the hidden layer's row exponents and bias, and the float
+        # output layer. The p1 weights follow the other tensors in the payload.
+        header += np.array([p1_q.shape[0]], "<u4").tobytes()
+        header += shifts.astype("<i4").tobytes()
+        header += p1_exp.astype("<i4").tobytes()
+        header += p1_b.astype("<i4").tobytes()
+        header += _as_array(head["pout_weight"]).astype("<f4").tobytes()
     header += b"\0" * (-len(header) % 16)
     # header_bytes is the second word, and tells the engine where the payload starts.
     header[8:12] = np.array([len(header)], "<u4").tobytes()
 
     return bytes(header) + b"".join(t.tobytes() for t in payload)
+
+
+def z_shifts(z_max, scale):
+    """Right shifts that bring the pooled head's int32 lanes into 16 bits.
+
+    ``z_max`` is (outcome, lane) in logits, and a lane holds ``z * scale`` in the
+    engine. Lane ``j`` of one half and lane ``j`` of the other trade places when
+    the engine evaluates the mirrored position, so both use the larger of their
+    two ranges. Returns (outcome, lane of the first half).
+    """
+    z_max = _as_array(z_max)
+    half = z_max.shape[1] // 2
+    lane = CALIBRATION_MARGIN * np.maximum(z_max[:, :half], z_max[:, half:]) * scale
+    return np.maximum(0, np.ceil(np.log2(np.maximum(lane, 1) / MAX_INT16))).astype(np.int64)
+
+
+def pooled_head(p1_weight, p1_bias, shifts, scale, full_scale, d):
+    """Quantize the pooled head's hidden layer for 16 bit inputs and 32 bit sums.
+
+    Its inputs are the lanes, shifted by ``shifts`` and saturated to 16 bits, then
+    the clipped global accumulator as the engine already holds it. The weights
+    absorb both input scales, and each row gets the largest power of two scale
+    under which the 32 bit sum provably cannot overflow for any inputs in range.
+
+    Returns ``(weights, bias, exponents)``: row ``r`` evaluates to
+    ``(weights[r] . inputs + bias[r]) * 2 ** -exponents[r]``.
+    """
+    lanes = np.concatenate([shifts, shifts], axis=1)
+    column = np.concatenate([(scale / 2.0 ** lanes).ravel(), np.tile(full_scale, 2)])
+    w = _as_array(p1_weight) / column
+    b = _as_array(p1_bias)
+    # A saturated lane can reach -32768.
+    x_max = np.concatenate([np.full(NUM_OUTPUTS * d, MAX_INT16 + 1.0),
+                            RELU_BOUND * np.tile(full_scale, 2)])
+    # Rounding moves every weight and the bias by at most half a unit.
+    room = MAX_INT32 - 0.5 * x_max.sum() - 0.5
+    row = np.minimum(room / (np.abs(w) @ x_max + np.abs(b)), MAX_INT16 / np.abs(w).max(1))
+    exponents = np.floor(np.log2(row)).astype(np.int64)
+    weights = _quantize(w, (2.0 ** exponents)[:, None], "p1.weight")
+    bias = np.rint(b * 2.0 ** exponents)
+    worst = np.abs(weights.astype(np.float64)) @ x_max + np.abs(bias)
+    if worst.max() > MAX_INT32:
+        raise ValueError(f"p1 can reach {worst.max():.0f}, beyond 32 bits")
+    return weights, bias.astype(np.int64), exponents
 
 
 def _shape(state, key):
@@ -273,20 +351,28 @@ def _shape(state, key):
     return tuple(state[key].shape)
 
 
-def from_state_dict(state):
-    """Pack a NetRelHD checkpoint, taking the dimensions from the tensor shapes.
-
-    The shapes also identify the architecture: NetRelHD feeds its output heads the
-    net and its mirror concatenated, so ``out.weight`` and ``fout.weight`` are
-    twice as wide on their input axis as they are in NetRelH.
-    """
+def unwrap_state(state):
+    """The weights of a checkpoint that may wrap them in a dict."""
     for wrapper in ("model", "state_dict", "model_state_dict"):
         if "c1.weight" not in state and wrapper in state:
             state = state[wrapper]
+    return state
 
-    if "p1.weight" in state:
-        raise ValueError("this is a NetRelHDP checkpoint; Winter cannot evaluate its "
-                         "pooled head, and packing it as NetRelHD would drop that head")
+
+def from_state_dict(state, positions=None):
+    """Pack a NetRelHD or NetRelHDP checkpoint, taking the dimensions from the tensor
+    shapes.
+
+    The shapes also identify the architecture: NetRelHD feeds its output heads the
+    net and its mirror concatenated, so ``out.weight`` and ``fout.weight`` are
+    twice as wide on their input axis as they are in NetRelH. NetRelHDP adds the
+    pooled head, whose input scales are calibrated on ``positions`` (a (N, 772)
+    tensor), so for it they are required.
+    """
+    state = unwrap_state(state)
+    pooled = "p1.weight" in state
+    if pooled and positions is None:
+        raise ValueError("a NetRelHDP net needs positions to calibrate its pooled head")
     c1 = _shape(state, "c1.weight")
     if len(c1) != 4 or c1[1] != NUM_PIECE_TYPES or c1[2:] != (GRID, GRID) \
             or c1[0] % NUM_PIECE_TYPES != 0:
@@ -312,9 +398,20 @@ def from_state_dict(state):
         raise ValueError(f"f1 takes {num_inputs} inputs, but the mirrored path can only "
                          f"supply {NUM_PIECE_TYPES * 64}")
 
+    head = None
+    if pooled:
+        pd = _shape(state, "p1.weight")[0]
+        for key, want in {"p1.weight": (pd, NUM_OUTPUTS * d + 2 * fd), "p1.bias": (pd,),
+                          "pout.weight": (NUM_OUTPUTS, pd)}.items():
+            if _shape(state, key) != want:
+                raise ValueError(f"{key} has shape {_shape(state, key)}, expected {want}")
+        head = {"p1_weight": state["p1.weight"], "p1_bias": state["p1.bias"],
+                "pout_weight": state["pout.weight"],
+                "z_max": observed_lanes(float_model(state), positions)}
+
     blob = pack(state["c1.weight"], state["b1"], state["out.weight"], state["out.bias"],
                 state["f1.weight"], state["f1.bias"], state["fout.weight"],
-                d=d, fd=fd, num_inputs=num_inputs)
+                d=d, fd=fd, num_inputs=num_inputs, head=head)
     return blob, d, fd, num_inputs
 
 
@@ -357,6 +454,195 @@ def from_float_file(path, d=None, fd=None, num_inputs=NUM_PIECE_TYPES * 64):
     return pack(*tensors, d=d, fd=fd, num_inputs=num_inputs), d, fd, num_inputs
 
 
+# Everything below evaluates nets on positions and needs torch, which the packing
+# above does not, so it is imported where it is used.
+
+def float_model(state, activation_bound=RELU_BOUND):
+    """The checkpoint as a float64 NetRelHD or NetRelHDP in eval mode."""
+    import torch
+    import torch.nn as nn
+    import model
+
+    state = unwrap_state(state)
+    d = _shape(state, "c1.weight")[0] // NUM_PIECE_TYPES
+    fd, num_inputs = _shape(state, "f1.weight")
+    kwargs = dict(d=d, fd=fd, num_inputs=num_inputs,
+                  activation=nn.Hardtanh(min_val=0, max_val=activation_bound))
+    if "p1.weight" in state:
+        net = model.NetRelHDP(pd=_shape(state, "p1.weight")[0], **kwargs)
+    else:
+        net = model.NetRelHD(**kwargs)
+    net.load_state_dict({k: torch.as_tensor(v) for k, v in state.items()})
+    return net.double().eval()
+
+
+def _batches(positions, batch_size=1024):
+    import torch
+    for i in range(0, positions.shape[0], batch_size):
+        yield torch.as_tensor(positions[i:i + batch_size], dtype=torch.float64)
+
+
+def _pooled_lanes(net, x):
+    """The lanes of NetRelHDP.forward: per outcome, one per int32 lane of Winter's
+    output accumulators. Also returns the global features."""
+    import torch
+    features, f = net.features(x)
+    z = torch.einsum('bcs,kcs->bkc', features.flatten(2), net.out.weight.flatten(2))
+    z = z.view(-1, NUM_OUTPUTS, 2, NUM_PIECE_TYPES, net.d).sum(3)
+    return z.reshape(-1, NUM_OUTPUTS, net.d, 2).sum(-1), f
+
+
+def observed_lanes(net, positions):
+    """Largest |lane| per (outcome, lane) over ``positions``, in logits."""
+    import torch
+    largest = None
+    with torch.no_grad():
+        for x in _batches(positions):
+            z = _pooled_lanes(net, x)[0].abs().amax(0)
+            largest = z if largest is None else torch.maximum(largest, z)
+    return largest.numpy()
+
+
+def unpack(blob):
+    """Read a quantized net back into its integer tensors and scales."""
+    if blob[:4] != MAGIC:
+        raise ValueError("bad magic, this is not a quantized net")
+    version, header_bytes, flags, d, fd, num_inputs = (
+        int(v) for v in np.frombuffer(blob, "<u4", 6, 4))
+    scale, relu_bound = (float(v) for v in np.frombuffer(blob, "<f4", 2, 40))
+    offset = 48
+
+    def take(dtype, count, start):
+        return np.frombuffer(blob, dtype, count, start), start + count * np.dtype(dtype).itemsize
+
+    net = dict(version=version, d=d, fd=fd, num_inputs=num_inputs, scale=scale,
+               relu_bound=relu_bound)
+    net["piece_scale"], offset = take("<i4", d, offset)
+    net["full_scale"], offset = take("<i4", fd, offset)
+    net["out_bias"], offset = take("<f4", NUM_OUTPUTS, offset)
+    if version == POOLED_FORMAT_VERSION:
+        (pd,), offset = take("<u4", 1, offset)
+        net["pd"] = pd = int(pd)
+        shifts, offset = take("<i4", NUM_OUTPUTS * (d // 2), offset)
+        net["shifts"] = shifts.reshape(NUM_OUTPUTS, d // 2)
+        net["p1_exp"], offset = take("<i4", pd, offset)
+        net["p1_bias"], offset = take("<i4", pd, offset)
+        pout, offset = take("<f4", NUM_OUTPUTS * pd, offset)
+        net["pout"] = pout.reshape(NUM_OUTPUTS, pd)
+    elif version != FORMAT_VERSION:
+        raise ValueError(f"unknown format version {version}")
+
+    offset = header_bytes
+    shapes = [("c1", (NUM_PIECE_TYPES * d, NUM_PIECE_TYPES, GRID, GRID)),
+              ("b1", (NUM_PIECE_TYPES * d, 8, 8)),
+              ("out", (NUM_OUTPUTS, 2 * NUM_PIECE_TYPES * d, 8, 8)),
+              ("f1", (fd, num_inputs)), ("f1_bias", (fd,)), ("fout", (NUM_OUTPUTS, 2 * fd))]
+    if version == POOLED_FORMAT_VERSION:
+        shapes.append(("p1", (net["pd"], NUM_OUTPUTS * d + 2 * fd)))
+    for name, shape in shapes:
+        values, offset = take("<i2", int(np.prod(shape)), offset)
+        net[name] = values.reshape(shape)
+    if offset != len(blob):
+        raise ValueError(f"{len(blob) - offset} unexpected bytes after the payload")
+    return net
+
+
+def simulate(net, positions):
+    """Logits Winter computes for ``positions`` with the unpacked net ``net``.
+
+    Every step before the pooled head is an integer sum or a clip, so running the
+    float net on the dequantized weights reproduces it exactly, and none of those
+    sums can overflow. The pooled head is evaluated as the engine does: lanes
+    shifted and saturated, a 32 bit sum, then float. Returns (logits, fraction of
+    saturated lane values).
+    """
+    import torch
+    import torch.nn as nn
+    import model
+
+    d, fd = net["d"], net["fd"]
+    ps = net["piece_scale"].astype(np.float64)
+    fs = net["full_scale"].astype(np.float64)
+    scale = net["scale"]
+    t = lambda a: torch.as_tensor(np.asarray(a, np.float64))
+
+    c1 = net["c1"] / np.tile(ps, NUM_PIECE_TYPES)[:, None, None, None]
+    # The stored bias has the self relation folded in, which the conv adds again.
+    types = np.arange(NUM_PIECE_TYPES)
+    self_relation = c1.reshape(NUM_PIECE_TYPES, d, NUM_PIECE_TYPES, GRID, GRID)[
+        types, :, types, 7, 7]
+    b1 = net["b1"].reshape(NUM_PIECE_TYPES, d, 8, 8) / ps[None, :, None, None] \
+        - self_relation[:, :, None, None]
+    state = {
+        "c1.weight": t(c1), "b1": t(b1.reshape(NUM_PIECE_TYPES * d, 8, 8)),
+        "out.weight": t(net["out"] / (scale / np.tile(ps, 2 * NUM_PIECE_TYPES))[None, :, None, None]),
+        "out.bias": t(net["out_bias"]),
+        "f1.weight": t(net["f1"] / fs[:, None]), "f1.bias": t(net["f1_bias"] / fs),
+        "fout.weight": t(net["fout"] / (scale / np.tile(fs, 2))[None, :]),
+    }
+    base = model.NetRelHD(d=d, fd=fd, num_inputs=net["num_inputs"],
+                          activation=nn.Hardtanh(min_val=0, max_val=net["relu_bound"]))
+    base.load_state_dict(state)
+    base = base.double().eval()
+
+    pooled = net["version"] == POOLED_FORMAT_VERSION
+    if pooled:
+        shifts = t(2.0 ** np.concatenate([net["shifts"], net["shifts"]], axis=1))
+        p1, p1_bias = t(net["p1"]), t(net["p1_bias"])
+        p1_unscale = t(2.0 ** -net["p1_exp"].astype(np.float64))
+        pout, full = t(net["pout"]), t(np.tile(fs, 2))
+
+    logits, saturated, lanes = [], 0, 0
+    with torch.no_grad():
+        for x in _batches(positions):
+            z, f = _pooled_lanes(base, x)
+            out = z.sum(-1) + base.out.bias + base.fout(f)
+            if pooled:
+                z16 = torch.floor(torch.round(z * scale) / shifts)
+                saturated += int((z16.abs() > MAX_INT16).sum())
+                lanes += z16.numel()
+                z16 = z16.clamp(-MAX_INT16 - 1, MAX_INT16)
+                inputs = torch.cat([z16.flatten(1), torch.round(f * full)], dim=1)
+                hidden = ((inputs @ p1.T + p1_bias) * p1_unscale).clamp(0, net["relu_bound"])
+                out = out + hidden @ pout.T
+            logits.append(out)
+    return torch.cat(logits), (saturated / lanes if lanes else 0.0)
+
+
+def check(state, blob, positions):
+    """Compare the quantized net in ``blob`` with the float checkpoint on ``positions``.
+
+    Returns a dict of the logit and expected score (win + draw / 2) errors, and the
+    fraction of pooled lanes that saturated.
+    """
+    import torch
+    net = float_model(state)
+    with torch.no_grad():
+        reference = torch.cat([net(x, activate=False) for x in _batches(positions)])
+    logits, saturated = simulate(unpack(blob), positions)
+
+    def expected_score(v):
+        p = torch.softmax(v, dim=-1)
+        return p[:, 0] + 0.5 * p[:, 1]
+
+    score_error = (expected_score(logits) - expected_score(reference)).abs()
+    return {"positions": positions.shape[0],
+            "max_logit_error": (logits - reference).abs().max().item(),
+            "mean_score_error": score_error.mean().item(),
+            "max_score_error": score_error.max().item(),
+            "saturated_lanes": saturated}
+
+
+def load_positions(name, data_dir, count, seed=0):
+    """Up to ``count`` positions of a dataset, as a dense (N, 772) float array."""
+    import loader
+    features, _ = loader.load_features_results(name, data_dir=data_dir)
+    if count and features.shape[0] > count:
+        rows = np.sort(np.random.default_rng(seed).choice(features.shape[0], count, replace=False))
+        features = features[rows]
+    return features.toarray().astype(np.float64)
+
+
 def main():
     import argparse
     import os
@@ -373,6 +659,15 @@ def main():
     parser.add_argument('--fd', type=int, default=None,
                         help="Full hidden-layer width; inferred when not given")
     parser.add_argument('--force', action='store_true', help="Overwrite the output if it exists")
+    parser.add_argument('--check', action='store_true',
+                        help="Simulate the written net on --positions and report its error "
+                             "against the float checkpoint (.pt input only)")
+    parser.add_argument('--positions', type=str, default="validation_games",
+                        help="Dataset that calibrates a NetRelHDP head and that --check uses")
+    parser.add_argument('--data-dir', type=str, default="../datasets/",
+                        help="Directory holding features_<positions>.npz")
+    parser.add_argument('--max-positions', type=int, default=20000,
+                        help="Random subset of --positions to use; 0 for all")
     args = parser.parse_args()
 
     out = args.output or os.path.splitext(args.input)[0] + ".qbin"
@@ -385,8 +680,15 @@ def main():
             state = torch.load(args.input, map_location="cpu", weights_only=True)
         except TypeError:      # torch older than 1.13
             state = torch.load(args.input, map_location="cpu")
-        blob, d, fd, num_inputs = from_state_dict(state)
+        state = unwrap_state(state)
+        positions = None
+        if "p1.weight" in state or args.check:
+            positions = load_positions(args.positions, args.data_dir, args.max_positions)
+            print(f"using {positions.shape[0]} positions from {args.positions}")
+        blob, d, fd, num_inputs = from_state_dict(state, positions)
     else:
+        if args.check:
+            sys.exit("--check needs a .pt checkpoint to compare against")
         blob, d, fd, num_inputs = from_float_file(args.input, args.d, args.fd)
 
     with open(out, "wb") as f:
@@ -399,6 +701,17 @@ def main():
           f"max {scales.max()}")
     print(f"  output scale: 2^{int(np.log2(scale))}")
     print(f"  set block_size = 2 * {d} and full_block_size = 2 * {fd} in Winter's net_types.h")
+    net = unpack(blob)
+    if net["version"] == POOLED_FORMAT_VERSION:
+        print(f"  pooled head: pd={net['pd']}, lane shifts {net['shifts'].min()}..{net['shifts'].max()}, "
+              f"row exponents {net['p1_exp'].min()}..{net['p1_exp'].max()} "
+              f"(format version {POOLED_FORMAT_VERSION})")
+    if args.check:
+        report = check(state, blob, positions)
+        print(f"  check on {report['positions']} positions: expected score error mean "
+              f"{report['mean_score_error']:.2e} max {report['max_score_error']:.2e}, "
+              f"logit error max {report['max_logit_error']:.4f}, "
+              f"saturated lanes {report['saturated_lanes']:.1e}")
     return 0
 
 
