@@ -126,13 +126,14 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=Fal
     do_act = activation_stats and isinstance(act, torch.nn.Module)
     eps = 1e-4
     max_val = getattr(act, "max_val", 8.0) if do_act else 8.0
-    elem = {"conv": [0, 0, 0], "fc": [0, 0, 0]}  # [num_zero, num_max, total]
+    elem = {"conv": [0, 0, 0], "fc": [0, 0, 0], "head": [0, 0, 0]}  # [num_zero, num_max, total]
     agg = {}  # bucket -> [running_max_per_unit, running_min_per_unit]
     piece_sum = 0.0
     pos_count = 0
 
-    def hook(module, inputs, output):
-        bucket = "fc" if output.dim() <= 2 else "conv"
+    def hook(module, inputs, output, bucket=None):
+        if bucket is None:
+            bucket = "fc" if output.dim() <= 2 else "conv"
         e = elem[bucket]
         e[0] += int((output <= eps).sum().item())
         e[1] += int((output >= max_val - eps).sum().item())
@@ -146,7 +147,15 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=Fal
             torch.maximum(agg[bucket][0], cur_max, out=agg[bucket][0])
             torch.minimum(agg[bucket][1], cur_min, out=agg[bucket][1])
 
-    handle = act.register_forward_hook(hook) if do_act else None
+    handles = []
+    if do_act:
+        handles.append(act.register_forward_hook(hook))
+        # A post-pooling head (NetRelHDP) has its own activation and its own bucket, since
+        # its units would otherwise be mixed into the fc layer's per-unit stats.
+        head_act = getattr(model, "head_activation", None)
+        if isinstance(head_act, torch.nn.Module):
+            handles.append(head_act.register_forward_hook(
+                lambda m, i, o: hook(m, i, o, bucket="head")))
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(config.device), target.to(config.device)
@@ -170,7 +179,7 @@ def test(model, test_loader, base_loss=F.mse_loss, rec=None, return_accuracy=Fal
                 correct += (output.argmax(dim=1) == target).sum().item()
                 n += target.numel()
             count += 1
-    if handle is not None:
+    for handle in handles:
         handle.remove()
     model.train(training)
 

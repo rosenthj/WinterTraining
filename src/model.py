@@ -1,3 +1,5 @@
+import copy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -617,6 +619,8 @@ class NetRelHDP(NetRelHD):
         super().__init__(d=d, fd=fd, num_inputs=num_inputs, activation=activation)
         assert d % 2 == 0, "d must be even to pair channels the way madd does"
         self.p1 = nn.Linear(3 * d + 2 * fd, pd)
+        # Its own instance so test() reports the head separately from the conv and fc layers.
+        self.head_activation = copy.deepcopy(activation)
         self.pout = nn.Linear(pd, 3, bias=False)
         nn.init.zeros_(self.pout.weight)
 
@@ -629,7 +633,7 @@ class NetRelHDP(NetRelHD):
         z = z.reshape(-1, 3, self.d, 2).sum(-1)
 
         x = z.sum(-1) + self.out.bias + self.fout(f)
-        h = self.activation(self.p1(torch.cat([z.flatten(1), f], dim=1)))
+        h = self.head_activation(self.p1(torch.cat([z.flatten(1), f], dim=1)))
         x = x + self.pout(h)
         if not activate:
             return x
