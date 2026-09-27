@@ -284,6 +284,9 @@ def from_state_dict(state):
         if "c1.weight" not in state and wrapper in state:
             state = state[wrapper]
 
+    if "p1.weight" in state:
+        raise ValueError("this is a NetRelHDP checkpoint; Winter cannot evaluate its "
+                         "pooled head, and packing it as NetRelHD would drop that head")
     c1 = _shape(state, "c1.weight")
     if len(c1) != 4 or c1[1] != NUM_PIECE_TYPES or c1[2:] != (GRID, GRID) \
             or c1[0] % NUM_PIECE_TYPES != 0:

@@ -509,7 +509,9 @@ class NetRelHD(nn.Module):
             "fout.weight": (1, 2),
         }
 
-    def forward(self, x_in, activate=True):
+    def features(self, x_in):
+        """Activated piece features (B, 2*12*d, 8, 8) and full layer features (B, 2*fd),
+        each as [real | mirror]."""
         x = x_in[:, :768].view(-1, 12, 8, 8)
         x_mirror = torch.zeros_like(x)
         for i in range(8):
@@ -526,9 +528,6 @@ class NetRelHD(nn.Module):
         xm = xm * mask_mirrored
 
         x = self.activation(torch.cat([x, xm], dim=1))
-        x = self.out(x)
-        x = torch.squeeze(x, 3)
-        x = torch.squeeze(x, 2)
 
         fx = x_in[:, :self.f_dim]
         fx = self.activation(self.f1(fx))
@@ -536,7 +535,14 @@ class NetRelHD(nn.Module):
         fxm = x_mirror.view(-1, 12*8*8)
         fxm = self.activation(self.f1(fxm))
 
-        x = x + self.fout(torch.cat([fx, fxm], dim=1))
+        return x, torch.cat([fx, fxm], dim=1)
+
+    def forward(self, x_in, activate=True):
+        x, f = self.features(x_in)
+        x = self.out(x)
+        x = torch.squeeze(x, 3)
+        x = torch.squeeze(x, 2)
+        x = x + self.fout(f)
         if not activate:
             return x
         return F.softmax(x, dim=-1)
@@ -580,6 +586,58 @@ class NetRelHD(nn.Module):
             print(f"Buffering quantized net ({len(blob)} bytes)")
         with open(filename, "wb") as f:
             f.write(blob)
+
+
+class NetRelHDP(NetRelHD):
+    """NetRelHD with a nonlinear head on the pooled piece features.
+
+    NetRelHD's piece head is linear, so each logit is a sum of per piece contributions
+    and pieces only interact through their own clipped relus. Here the head is split
+    before that final sum: z[k, j] pools the contributions of feature lane j to outcome k
+    over all pieces, and a small hidden layer reads [z, full layer features]:
+
+        logits = sum_j z[:, :, j] + out.bias + fout(f)    (exactly NetRelHD)
+               + pout(act(p1([z, f])))                    (the pooled head)
+
+    pout starts at zero, so the net initially computes the same function as NetRelHD,
+    including when seeded from a NetRelHD checkpoint via --init-from.
+
+    The lanes match Winter's output accumulators (output_helpers): a piece's 2*d
+    features are stored as [real | mirror] and madd sums adjacent channel pairs into
+    one int32 lane, so z has d lanes per outcome. With black to move Winter uses the
+    mirrored output weights, which swaps the halves of z and of f, so an engine
+    version needs a mirrored p1 as well, like fout.
+
+    Winter cannot evaluate this head yet, so there is no quantized export.
+    """
+    # save() skips the quantized export when this is None.
+    serialize_quantized = None
+
+    def __init__(self, d=8, fd=64, pd=32, num_inputs=772, activation=F.relu):
+        super().__init__(d=d, fd=fd, num_inputs=num_inputs, activation=activation)
+        assert d % 2 == 0, "d must be even to pair channels the way madd does"
+        self.p1 = nn.Linear(3 * d + 2 * fd, pd)
+        self.pout = nn.Linear(pd, 3, bias=False)
+        nn.init.zeros_(self.pout.weight)
+
+    def forward(self, x_in, activate=True):
+        x, f = self.features(x_in)
+        # Per channel contributions of the out conv, summed over squares.
+        z = torch.einsum('bcs,kcs->bkc', x.flatten(2), self.out.weight.flatten(2))
+        # Pool over the 12 piece planes, then pair adjacent channels like madd.
+        z = z.view(-1, 3, 2, 12, self.d).sum(3)
+        z = z.reshape(-1, 3, self.d, 2).sum(-1)
+
+        x = z.sum(-1) + self.out.bias + self.fout(f)
+        h = self.activation(self.p1(torch.cat([z.flatten(1), f], dim=1)))
+        x = x + self.pout(h)
+        if not activate:
+            return x
+        return F.softmax(x, dim=-1)
+
+    def serialize(self, filename, verbose=0):
+        print(f"Skipping serialize call. Not yet implemented!")
+        return
 
 
 class CRNet(nn.Module):

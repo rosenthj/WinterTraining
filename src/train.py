@@ -389,7 +389,7 @@ def save(model, path=None, name=None, epoch=None, write_bin=None):
     if write_bin if write_bin is not None else is_tmp:
         # Winter reads the quantized .qbin. serialize() is kept for the architectures
         # that do not have a quantized exporter, and for anything wanting raw floats.
-        if hasattr(model, "serialize_quantized"):
+        if getattr(model, "serialize_quantized", None) is not None:
             model.serialize_quantized(f"{path}.qbin", verbose=1)
         else:
             model.serialize(f"{path}.bin", verbose=1)

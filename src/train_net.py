@@ -8,24 +8,26 @@ import torch.nn.functional as F
 import config
 from loader import (discover_dataset_tags, select_dataset_tags, load_from_multiple,
                     load_features_results, make_scatter_loader)
-from model import NetRel, NetRelH, NetRelHD
+from model import NetRel, NetRelH, NetRelHD, NetRelHDP
 from train import (scheduled_lr_train, load_resume_state, load_partial_state_dict,
                    SegmentBudget, resolve_deadline)
 
 
-# Model name -> (class, accepts_fd). Add new architectures here to expose them on the CLI.
+# Model name -> (class, extra size args it accepts). Add new architectures here to expose
+# them on the CLI.
 MODELS = {
-    "NetRelHD": (NetRelHD, True),
-    "NetRelH": (NetRelH, True),
-    "NetRel": (NetRel, False),
+    "NetRelHDP": (NetRelHDP, ("fd", "pd")),
+    "NetRelHD": (NetRelHD, ("fd",)),
+    "NetRelH": (NetRelH, ("fd",)),
+    "NetRel": (NetRel, ()),
 }
 
 
 def build_model(args, activation):
-    cls, accepts_fd = MODELS[args.model]
+    cls, size_args = MODELS[args.model]
     kwargs = dict(d=args.d, num_inputs=args.num_inputs, activation=activation)
-    if accepts_fd:
-        kwargs["fd"] = args.fd
+    for name in size_args:
+        kwargs[name] = getattr(args, name)
     return cls(**kwargs)
 
 
@@ -72,6 +74,8 @@ def parse_args():
                         help="Network architecture")
     parser.add_argument('--d', type=int, default=16, help="Relative-conv block width")
     parser.add_argument('--fd', type=int, default=64, help="Full hidden-layer width (H models)")
+    parser.add_argument('--pd', type=int, default=32,
+                        help="Hidden width of the pooled piece head (NetRelHDP)")
     parser.add_argument('--num-inputs', type=int, default=768, help="Number of input features used")
     parser.add_argument('--load', type=str, default=None,
                         help="Path to a checkpoint to load weights from (one-off; no schedule resume)")
