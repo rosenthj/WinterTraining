@@ -148,7 +148,8 @@ CONVERT_JOB_NAME="${CONVERT_JOB_NAME:-winterconv}"
 # GPU partitions, so we request 1 A100 to satisfy the partition.
 SLURM_ACCOUNT="${SLURM_ACCOUNT:-antoniob}"
 SLURM_QOS="${SLURM_QOS:-standby}"
-SLURM_PARTITION="${SLURM_PARTITION:-a100-80gb}"
+# A comma-separated list lets SLURM start the job on whichever partition frees up first.
+SLURM_PARTITION="${SLURM_PARTITION:-a100-40gb,a100-80gb}"
 SLURM_CPUS="${SLURM_CPUS:-32}"
 SLURM_GPUS_PER_NODE="${SLURM_GPUS_PER_NODE:-1}"
 SLURM_MEM="${SLURM_MEM:-16g}"

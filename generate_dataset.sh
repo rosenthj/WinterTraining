@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A antoniob
 #SBATCH -q standby
-#SBATCH --partition=a100-80gb
+#SBATCH --partition=a100-40gb,a100-80gb
 #SBATCH --mem=32g
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
