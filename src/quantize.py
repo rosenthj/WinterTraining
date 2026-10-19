@@ -273,8 +273,8 @@ def pack(c1_weight, b1, out_weight, out_bias, f1_weight, f1_bias, fout_weight,
     version = FORMAT_VERSION
     if head is not None:
         version = POOLED_FORMAT_VERSION
-        shifts = z_shifts(head["z_max"], scale)
-        p1_q, p1_b, p1_exp = pooled_head(head["p1_weight"], head["p1_bias"], shifts, scale,
+        shift = z_shift(head["z_max"], scale)
+        p1_q, p1_b, p1_exp = pooled_head(head["p1_weight"], head["p1_bias"], shift, scale,
                                          full_scale, d)
         payload.append(p1_q)
 
@@ -286,11 +286,11 @@ def pack(c1_weight, b1, out_weight, out_bias, f1_weight, f1_bias, fout_weight,
     header += full_scale.astype("<i4").tobytes()
     header += _as_array(out_bias).reshape(NUM_OUTPUTS).astype("<f4").tobytes()
     if head is not None:
-        # Version 2 appends: pd, the lane shifts of the first half (the mirror half
-        # uses the same), the hidden layer's row exponents and bias, and the float
-        # output layer. The p1 weights follow the other tensors in the payload.
+        # Version 2 appends: pd, the lane shift, the hidden layer's row exponents
+        # and bias, and the float output layer. The p1 weights follow the other
+        # tensors in the payload.
         header += np.array([p1_q.shape[0]], "<u4").tobytes()
-        header += shifts.astype("<i4").tobytes()
+        header += np.array([shift], "<i4").tobytes()
         header += p1_exp.astype("<i4").tobytes()
         header += p1_b.astype("<i4").tobytes()
         header += _as_array(head["pout_weight"]).astype("<f4").tobytes()
@@ -301,24 +301,21 @@ def pack(c1_weight, b1, out_weight, out_bias, f1_weight, f1_bias, fout_weight,
     return bytes(header) + b"".join(t.tobytes() for t in payload)
 
 
-def z_shifts(z_max, scale):
-    """Right shifts that bring the pooled head's int32 lanes into 16 bits.
+def z_shift(z_max, scale):
+    """Right shift that brings the pooled head's int32 lanes into 16 bits.
 
-    ``z_max`` is (outcome, lane) in logits, and a lane holds ``z * scale`` in the
-    engine. Lane ``j`` of one half and lane ``j`` of the other trade places when
-    the engine evaluates the mirrored position, so both use the larger of their
-    two ranges. Returns (outcome, lane of the first half).
+    ``z_max`` is the largest |lane| per (outcome, lane) in logits, and a lane holds
+    ``z * scale`` in the engine. One shift serves every lane: a per lane shift
+    was barely more accurate, and only AVX2 can shift lanes by different amounts.
     """
-    z_max = _as_array(z_max)
-    half = z_max.shape[1] // 2
-    lane = CALIBRATION_MARGIN * np.maximum(z_max[:, :half], z_max[:, half:]) * scale
-    return np.maximum(0, np.ceil(np.log2(np.maximum(lane, 1) / MAX_INT16))).astype(np.int64)
+    lane = CALIBRATION_MARGIN * _as_array(z_max).max() * scale
+    return max(0, int(np.ceil(np.log2(max(lane, 1.0) / MAX_INT16))))
 
 
-def pooled_head(p1_weight, p1_bias, shifts, scale, full_scale, d):
+def pooled_head(p1_weight, p1_bias, shift, scale, full_scale, d):
     """Quantize the pooled head's hidden layer for 16 bit inputs and 32 bit sums.
 
-    Its inputs are the lanes, shifted by ``shifts`` and saturated to 16 bits, then
+    Its inputs are the lanes, shifted by ``shift`` and saturated to 16 bits, then
     the clipped global accumulator as the engine already holds it. The weights
     absorb both input scales, and each row gets the largest power of two scale
     under which the 32 bit sum provably cannot overflow for any inputs in range.
@@ -326,8 +323,8 @@ def pooled_head(p1_weight, p1_bias, shifts, scale, full_scale, d):
     Returns ``(weights, bias, exponents)``: row ``r`` evaluates to
     ``(weights[r] . inputs + bias[r]) * 2 ** -exponents[r]``.
     """
-    lanes = np.concatenate([shifts, shifts], axis=1)
-    column = np.concatenate([(scale / 2.0 ** lanes).ravel(), np.tile(full_scale, 2)])
+    column = np.concatenate([np.full(NUM_OUTPUTS * d, scale / 2.0 ** shift),
+                             np.tile(full_scale, 2)])
     w = _as_array(p1_weight) / column
     b = _as_array(p1_bias)
     # A saturated lane can reach -32768.
@@ -373,6 +370,9 @@ def from_state_dict(state, positions=None):
     pooled = "p1.weight" in state
     if pooled and positions is None:
         raise ValueError("a NetRelHDP net needs positions to calibrate its pooled head")
+    if "zskip.weight" in state:
+        raise ValueError("this NetRelHDP uses non-default --pools, which Winter's net format "
+                         "does not support")
     c1 = _shape(state, "c1.weight")
     if len(c1) != 4 or c1[1] != NUM_PIECE_TYPES or c1[2:] != (GRID, GRID) \
             or c1[0] % NUM_PIECE_TYPES != 0:
@@ -400,6 +400,9 @@ def from_state_dict(state, positions=None):
 
     head = None
     if pooled:
+        if _shape(state, "p1.weight")[1] != NUM_OUTPUTS * d + 2 * fd:
+            raise ValueError("this NetRelHDP uses non-default --head-inputs, "
+                             "which Winter's net format does not support")
         pd = _shape(state, "p1.weight")[0]
         for key, want in {"p1.weight": (pd, NUM_OUTPUTS * d + 2 * fd), "p1.bias": (pd,),
                           "pout.weight": (NUM_OUTPUTS, pd)}.items():
@@ -523,8 +526,8 @@ def unpack(blob):
     if version == POOLED_FORMAT_VERSION:
         (pd,), offset = take("<u4", 1, offset)
         net["pd"] = pd = int(pd)
-        shifts, offset = take("<i4", NUM_OUTPUTS * (d // 2), offset)
-        net["shifts"] = shifts.reshape(NUM_OUTPUTS, d // 2)
+        (shift,), offset = take("<i4", 1, offset)
+        net["shift"] = int(shift)
         net["p1_exp"], offset = take("<i4", pd, offset)
         net["p1_bias"], offset = take("<i4", pd, offset)
         pout, offset = take("<f4", NUM_OUTPUTS * pd, offset)
@@ -587,7 +590,7 @@ def simulate(net, positions):
 
     pooled = net["version"] == POOLED_FORMAT_VERSION
     if pooled:
-        shifts = t(2.0 ** np.concatenate([net["shifts"], net["shifts"]], axis=1))
+        shift = 2.0 ** net["shift"]
         p1, p1_bias = t(net["p1"]), t(net["p1_bias"])
         p1_unscale = t(2.0 ** -net["p1_exp"].astype(np.float64))
         pout, full = t(net["pout"]), t(np.tile(fs, 2))
@@ -598,7 +601,7 @@ def simulate(net, positions):
             z, f = _pooled_lanes(base, x)
             out = z.sum(-1) + base.out.bias + base.fout(f)
             if pooled:
-                z16 = torch.floor(torch.round(z * scale) / shifts)
+                z16 = torch.floor(torch.round(z * scale) / shift)
                 saturated += int((z16.abs() > MAX_INT16).sum())
                 lanes += z16.numel()
                 z16 = z16.clamp(-MAX_INT16 - 1, MAX_INT16)
@@ -703,7 +706,7 @@ def main():
     print(f"  set block_size = 2 * {d} and full_block_size = 2 * {fd} in Winter's net_types.h")
     net = unpack(blob)
     if net["version"] == POOLED_FORMAT_VERSION:
-        print(f"  pooled head: pd={net['pd']}, lane shifts {net['shifts'].min()}..{net['shifts'].max()}, "
+        print(f"  pooled head: pd={net['pd']}, lane shift {net['shift']}, "
               f"row exponents {net['p1_exp'].min()}..{net['p1_exp'].max()} "
               f"(format version {POOLED_FORMAT_VERSION})")
     if args.check:

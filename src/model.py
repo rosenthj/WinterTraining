@@ -595,30 +595,49 @@ class NetRelHDP(NetRelHD):
 
     NetRelHD's piece head is linear, so each logit is a sum of per piece contributions
     and pieces only interact through their own clipped relus. Here the head is split
-    before that final sum: z[k, j] pools the contributions of feature lane j to outcome k
-    over all pieces, and a small hidden layer reads [z, full layer features]:
+    before that final sum: z[k, j] pools the contributions of feature lane j over all
+    pieces, with one set of output weights per pooling k, and a small hidden layer
+    reads [z, full layer features]. With the defaults:
 
         logits = sum_j z[:, :, j] + out.bias + fout(f)    (exactly NetRelHD)
                + pout(act(p1([z, f])))                    (the pooled head)
 
-    pout starts at zero, so the net initially computes the same function as NetRelHD,
-    including when seeded from a NetRelHD checkpoint via --init-from.
+    Options for architecture experiments:
+      head_inputs: what p1 reads, "zf" (both, the default), "z" (pooled piece lanes
+          only) or "f" (full layer only, which makes the head a deeper global path).
+      pools: number of poolings. 3, the default, is one per outcome, and their lanes
+          summed are the NetRelHD logits. Any other number pools into that many lane
+          sets and replaces the sum with a learned linear skip, zskip. pools=1 costs
+          the engine one madd per piece instead of three.
+
+    pout starts at zero, so with the defaults the net initially computes the same
+    function as NetRelHD, including when seeded from a NetRelHD checkpoint via
+    --init-from.
 
     The lanes match Winter's output accumulators (output_helpers): a piece's 2*d
     features are stored as [real | mirror] and madd sums adjacent channel pairs into
-    one int32 lane, so z has d lanes per outcome. With black to move Winter uses the
+    one int32 lane, so z has d lanes per pooling. With black to move Winter uses the
     mirrored output weights, which swaps the halves of z and of f, so an engine
     version needs a mirrored p1 as well, like fout.
 
-    Winter cannot evaluate this head yet, so there is no quantized export.
+    Winter and quantize.py support the defaults only.
     """
     # save() skips the quantized export when this is None.
     serialize_quantized = None
 
-    def __init__(self, d=8, fd=64, pd=32, num_inputs=772, activation=F.relu):
+    def __init__(self, d=8, fd=64, pd=32, head_inputs="zf", pools=3, num_inputs=772,
+                 activation=F.relu):
         super().__init__(d=d, fd=fd, num_inputs=num_inputs, activation=activation)
         assert d % 2 == 0, "d must be even to pair channels the way madd does"
-        self.p1 = nn.Linear(3 * d + 2 * fd, pd)
+        assert head_inputs in ("zf", "z", "f"), f"unknown head_inputs '{head_inputs}'"
+        assert pools >= 1, "pools must be at least 1"
+        self.head_inputs = head_inputs
+        self.pools = pools
+        if pools != 3:
+            self.out = nn.Conv2d(2 * 12 * d, pools, 8, padding=0, bias=False)
+            self.zskip = nn.Linear(pools * d, 3)
+        p1_inputs = ("z" in head_inputs) * pools * d + ("f" in head_inputs) * 2 * fd
+        self.p1 = nn.Linear(p1_inputs, pd)
         # Its own instance so test() reports the head separately from the conv and fc layers.
         self.head_activation = copy.deepcopy(activation)
         self.pout = nn.Linear(pd, 3, bias=False)
@@ -629,11 +648,20 @@ class NetRelHDP(NetRelHD):
         # Per channel contributions of the out conv, summed over squares.
         z = torch.einsum('bcs,kcs->bkc', x.flatten(2), self.out.weight.flatten(2))
         # Pool over the 12 piece planes, then pair adjacent channels like madd.
-        z = z.view(-1, 3, 2, 12, self.d).sum(3)
-        z = z.reshape(-1, 3, self.d, 2).sum(-1)
+        z = z.view(-1, self.pools, 2, 12, self.d).sum(3)
+        z = z.reshape(-1, self.pools, self.d, 2).sum(-1)
 
-        x = z.sum(-1) + self.out.bias + self.fout(f)
-        h = self.head_activation(self.p1(torch.cat([z.flatten(1), f], dim=1)))
+        if self.pools == 3:
+            x = z.sum(-1) + self.out.bias + self.fout(f)
+        else:
+            x = self.zskip(z.flatten(1)) + self.fout(f)
+        if self.head_inputs == "zf":
+            head_input = torch.cat([z.flatten(1), f], dim=1)
+        elif self.head_inputs == "z":
+            head_input = z.flatten(1)
+        else:
+            head_input = f
+        h = self.head_activation(self.p1(head_input))
         x = x + self.pout(h)
         if not activate:
             return x

@@ -16,7 +16,7 @@ from train import (scheduled_lr_train, load_resume_state, load_partial_state_dic
 # Model name -> (class, extra size args it accepts). Add new architectures here to expose
 # them on the CLI.
 MODELS = {
-    "NetRelHDP": (NetRelHDP, ("fd", "pd")),
+    "NetRelHDP": (NetRelHDP, ("fd", "pd", "head_inputs", "pools")),
     "NetRelHD": (NetRelHD, ("fd",)),
     "NetRelH": (NetRelH, ("fd",)),
     "NetRel": (NetRel, ()),
@@ -76,6 +76,12 @@ def parse_args():
     parser.add_argument('--fd', type=int, default=64, help="Full hidden-layer width (H models)")
     parser.add_argument('--pd', type=int, default=32,
                         help="Hidden width of the pooled piece head (NetRelHDP)")
+    parser.add_argument('--head-inputs', type=str, default="zf", choices=["zf", "z", "f"],
+                        help="What the NetRelHDP head reads: pooled piece lanes and full layer "
+                             "(zf), lanes only (z), or full layer only (f)")
+    parser.add_argument('--pools', type=int, default=3,
+                        help="NetRelHDP poolings: 3 is one per outcome with the NetRelHD sum as "
+                             "skip; any other count gets a learned linear skip instead")
     parser.add_argument('--num-inputs', type=int, default=768, help="Number of input features used")
     parser.add_argument('--load', type=str, default=None,
                         help="Path to a checkpoint to load weights from (one-off; no schedule resume)")
