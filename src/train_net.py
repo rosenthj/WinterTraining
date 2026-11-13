@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 import config
 from loader import (discover_dataset_tags, select_dataset_tags, load_from_multiple,
-                    load_features_results, make_scatter_loader)
+                    load_features_results, make_scatter_loader, warn_if_no_castling)
 from model import NetRel, NetRelH, NetRelHD, NetRelHDP
 from train import (scheduled_lr_train, load_resume_state, load_partial_state_dict,
                    SegmentBudget, resolve_deadline)
@@ -82,7 +82,10 @@ def parse_args():
     parser.add_argument('--pools', type=int, default=3,
                         help="NetRelHDP poolings: 3 is one per outcome with the NetRelHD sum as "
                              "skip; any other count gets a learned linear skip instead")
-    parser.add_argument('--num-inputs', type=int, default=768, help="Number of input features used")
+    parser.add_argument('--num-inputs', type=int, default=768,
+                        help="Inputs of the full layer (H models): 768 reads the piece squares "
+                             "only, 772 also reads the four castling rights that every dataset "
+                             "row already carries. NetRelHD and NetRelHDP accept only these two.")
     parser.add_argument('--load', type=str, default=None,
                         help="Path to a checkpoint to load weights from (one-off; no schedule resume)")
     parser.add_argument('--init-from', type=str, default=None,
@@ -250,12 +253,17 @@ def main():
     config.name = args.name
     print(f"Compute device is {config.device}")
 
+    # A model that reads the castling inputs trusts them in every row, so point out any
+    # dataset that never sets one (an auxiliary set built from bare piece placements, say).
+    reads_castling = args.num_inputs > 768
+
     # A fresh scatter-loader over a (possibly subsampled) draw of the selected datasets.
     def build_train_loader():
         aux_portion = args.portion if args.aux_portion is None else args.aux_portion
         selection = list(tags) + [(tag, aux_portion, args.aux_data_dir) for tag in aux_tags]
         features, results = load_from_multiple(selection, portion=args.portion,
-                                               save_dir=args.data_dir)
+                                               save_dir=args.data_dir,
+                                               check_castling=reads_castling)
         print(f"Loaded {features.shape[0]} positions ({features.shape[1]} features each)")
         return make_scatter_loader(features, results, batch_size=args.batch_size,
                                    shuffle=True, device=config.device)
@@ -273,6 +281,8 @@ def main():
     val_loader = None
     if args.val_name:
         vf, vr = load_features_results(args.val_name, data_dir=args.data_dir)
+        if reads_castling:
+            warn_if_no_castling(vf, f"validation set {args.val_name}")
         val_loader = make_scatter_loader(vf, vr, batch_size=args.batch_size,
                                          shuffle=False, device=config.device)
         print(f"Validation: {vf.shape[0]} positions from {args.val_name}")

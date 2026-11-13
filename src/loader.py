@@ -112,6 +112,38 @@ def select_dataset_tags(tokens, available_tags, exclude=None, warn=print):
     return selected
 
 
+# Columns 768..771 of a dataset row are the castling rights (see chess_utils.get_features).
+CASTLING_FIRST_COLUMN = 768
+
+# Files already checked by warn_if_no_castling, so --reload-every reports each one once.
+_castling_checked = set()
+
+
+def has_castling_rights(features):
+    """Whether any row of a CSR dataset has a castling right set."""
+    if features.shape[1] <= CASTLING_FIRST_COLUMN or features.nnz == 0:
+        return False
+    return int(features.tocsr().indices.max()) >= CASTLING_FIRST_COLUMN
+
+
+def warn_if_no_castling(features, label, warn=print):
+    """Warn, once per ``label``, about a dataset in which no position has a castling right.
+
+    A net that reads the castling inputs (--num-inputs 772) takes every row at its word.
+    Positions extracted from games always include some with rights, so a dataset without
+    a single one was most likely built by a path that did not record them, and its rows
+    would then teach the net that those positions had none. Returns whether rights were
+    found.
+    """
+    found = has_castling_rights(features)
+    if not found and label not in _castling_checked:
+        warn(f"WARNING: {label} has no castling rights set in any of its "
+             f"{features.shape[0]} positions. If its positions could have had them, "
+             f"the castling inputs are being trained on wrong data.")
+    _castling_checked.add(label)
+    return found
+
+
 def load_features_results(name, data_dir="../datasets/"):
     features = scipy.sparse.load_npz(os.path.join(data_dir, f"features_{name}.npz"))
     results = np.load(os.path.join(data_dir, f"targets_{name}.npz"))['arr_0']
@@ -232,7 +264,7 @@ def load_dataset_ocb(name, batch_size=16, shuffle=True):
     return torch.utils.data.DataLoader(CSRDataset(features, results), batch_size=batch_size, shuffle=shuffle)
 
 
-def load_from_multiple(lst, portion=1.0, save_dir="./"):
+def load_from_multiple(lst, portion=1.0, save_dir="./", check_castling=False):
     """Load and concatenate several desk datasets, optionally subsampling each.
 
     Each element of ``lst`` is either a tag (e.g. ``"100a"``) loaded at the shared
@@ -248,6 +280,9 @@ def load_from_multiple(lst, portion=1.0, save_dir="./"):
     more rows (and thus more gradient mass / a larger batch share) than its raw size. This
     duplicates rows in memory, so prefer lowering the *other* datasets' portion when the
     goal is to raise one dataset's relative weight on a memory-constrained machine.
+
+    ``check_castling`` warns about any dataset that carries no castling rights at all (see
+    ``warn_if_no_castling``); set it when the model reads the castling inputs.
     """
     def unpack(el):
         directory = save_dir
@@ -267,6 +302,9 @@ def load_from_multiple(lst, portion=1.0, save_dir="./"):
     for feature_filename, label_filename, por in (unpack(el) for el in lst):
         f0 = scipy.sparse.load_npz(feature_filename)
         r0 = np.load(label_filename)['arr_0']
+        # On the whole file, before subsampling, so the verdict does not depend on the draw.
+        if check_castling and feature_filename not in _castling_checked:
+            warn_if_no_castling(f0, feature_filename)
 
         def random_subset(frac):
             # A uniformly random subset of exactly int(frac * n) rows. np.random.permutation

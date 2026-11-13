@@ -35,6 +35,16 @@ GRID = 15
 NUM_OUTPUTS = 3
 MAX_PIECES = 32
 
+# Inputs of the full layer. The first 768 are the piece squares. A net trained with
+# --num-inputs 772 also reads the four castling rights, in the column order of
+# chess_utils.get_features: white queenside, white kingside, black queenside, black
+# kingside. CASTLING_MIRROR[i] is the right that takes column i's place when the board is
+# seen from the other side, which swaps the colours and keeps the wings.
+NUM_PIECE_INPUTS = NUM_PIECE_TYPES * 64
+NUM_CASTLING_INPUTS = 4
+CASTLING_MIRROR = (2, 3, 0, 1)
+SUPPORTED_NUM_INPUTS = (NUM_PIECE_INPUTS, NUM_PIECE_INPUTS + NUM_CASTLING_INPUTS)
+
 # A side has at most 15 non king pieces, at most 8 of which are pawns.
 # Promotions allow up to 10 of any other type. Index order is Winter's:
 # pawn, knight, bishop, rook, queen, king.
@@ -73,6 +83,9 @@ def engine_tensors(c1_weight, b1, out_weight, f1_weight, f1_bias, fout_weight, d
       OW[piece][square][outcome][channel]       piece output head, and its mirror
       FL[piece][square][channel], FLB[channel]  global accumulator and its bias
       FO[outcome][channel]                      global output head, and its mirror
+
+    ``f1_weight`` may carry castling columns after the piece squares. They are not
+    part of FL, see ``castling_tensor``.
     """
     block, full_block = 2 * d, 2 * fd
     mirror_pt = np.array([(p + 6) % NUM_PIECE_TYPES for p in range(NUM_PIECE_TYPES)])
@@ -83,7 +96,8 @@ def engine_tensors(c1_weight, b1, out_weight, f1_weight, f1_bias, fout_weight, d
     c1 = _as_array(c1_weight).reshape(NUM_PIECE_TYPES, d, NUM_PIECE_TYPES, GRID, GRID)
     bias = _as_array(b1).reshape(NUM_PIECE_TYPES, d, 8, 8)
     out = _as_array(out_weight).reshape(NUM_OUTPUTS, 2, NUM_PIECE_TYPES, d, 8, 8)
-    f1w = _as_array(f1_weight).reshape(fd, NUM_PIECE_TYPES, 64)
+    f1w = _as_array(f1_weight).reshape(fd, -1)[:, :NUM_PIECE_INPUTS].reshape(
+        fd, NUM_PIECE_TYPES, 64)
     f1b = _as_array(f1_bias).reshape(fd)
     fow = _as_array(fout_weight).reshape(NUM_OUTPUTS, full_block)
 
@@ -116,6 +130,22 @@ def engine_tensors(c1_weight, b1, out_weight, f1_weight, f1_bias, fout_weight, d
     FO = fow
     MFO = np.concatenate([fow[:, fd:], fow[:, :fd]], axis=1)
     return W, B, OW, MOW, FL, FLB, FO, MFO
+
+
+def castling_tensor(f1_weight, fd):
+    """What each castling right adds to the global accumulator, in Winter's layout.
+
+    Returns ``FX[right][channel]`` with ``2 * fd`` channels: the first half is the
+    column as trained, the second half the column of the mirrored right, which is
+    what the mirrored half of the net reads. Empty for a net without castling inputs.
+    """
+    extra = _as_array(f1_weight).reshape(fd, -1)[:, NUM_PIECE_INPUTS:]
+    if extra.shape[1] == 0:
+        return np.zeros((0, 2 * fd))
+    if extra.shape[1] != NUM_CASTLING_INPUTS:
+        raise ValueError(f"f1 has {extra.shape[1]} inputs beyond the piece squares, "
+                         f"expected none or the {NUM_CASTLING_INPUTS} castling rights")
+    return np.concatenate([extra.T, extra.T[list(CASTLING_MIRROR)]], axis=1)
 
 
 def _bound_side(candidates):
@@ -167,12 +197,21 @@ def piece_scales(W, B):
     return _scale_from_bound(bound)
 
 
-def full_scales(FL, FLB):
+def full_scales(FL, FLB, FX=None):
     """Scales for the global accumulator, where a piece contributes one weight
-    per square it can stand on."""
+    per square it can stand on.
+
+    ``FX`` holds the castling columns (``castling_tensor``). Every right is counted
+    as free to be present or absent whatever the pieces do, so each one widens the
+    bound by its weight in the direction it pushes. That is slightly conservative,
+    since a right pins its king and rook to their home squares.
+    """
     up, down = _extremes(FL.transpose(2, 0, 1))
     hi = FLB + _bound_side(up[:, :6]) + _bound_side(up[:, 6:])
     lo = FLB - _bound_side(down[:, :6]) - _bound_side(down[:, 6:])
+    if FX is not None and FX.shape[0]:
+        hi = hi + np.maximum(FX, 0.0).sum(0)
+        lo = lo + np.minimum(FX, 0.0).sum(0)
     return _scale_from_bound(np.maximum(hi, -lo))
 
 
@@ -230,11 +269,18 @@ def pack(c1_weight, b1, out_weight, out_bias, f1_weight, f1_bias, fout_weight,
     ``pooled_head``): a dict of ``p1_weight``, ``p1_bias``, ``pout_weight`` and
     ``z_max``, the largest |lane| per (outcome, lane) seen in calibration, in
     logits. Without it the file is version 1, byte for byte as before.
+
+    ``num_inputs`` is 768, or 772 for a net that reads the castling rights. Neither
+    the version nor the layout changes for the latter: f1 is stored as
+    ``(fd, num_inputs)`` either way, so its rows simply grow by the four castling
+    columns, and the header's input count tells the engine which it is.
     """
+    if num_inputs not in SUPPORTED_NUM_INPUTS:
+        raise ValueError(f"f1 takes {num_inputs} inputs, expected one of {SUPPORTED_NUM_INPUTS}")
     W, B, OW, MOW, FL, FLB, FO, MFO = engine_tensors(
         c1_weight, b1, out_weight, f1_weight, f1_bias, fout_weight, d, fd)
     piece_scale = piece_scales(W, B)
-    full_scale = full_scales(FL, FLB)
+    full_scale = full_scales(FL, FLB, castling_tensor(f1_weight, fd))
     scale = output_scale(OW, MOW, FO, MFO, piece_scale, full_scale)
 
     # Winter derives one scale per dimension and applies it to both halves of an
@@ -394,9 +440,10 @@ def from_state_dict(state, positions=None):
             if key in ("out.weight", "fout.weight") and got[1] * 2 == want[1]:
                 hint = " -- this looks like NetRelH, which Winter does not load"
             raise ValueError(f"{key} has shape {got}, expected {want}{hint}")
-    if num_inputs != NUM_PIECE_TYPES * 64:
+    if num_inputs not in SUPPORTED_NUM_INPUTS:
         raise ValueError(f"f1 takes {num_inputs} inputs, but the mirrored path can only "
-                         f"supply {NUM_PIECE_TYPES * 64}")
+                         f"supply {' or '.join(map(str, SUPPORTED_NUM_INPUTS))} "
+                         f"(piece squares, optionally with the castling rights)")
 
     head = None
     if pooled:
@@ -418,7 +465,7 @@ def from_state_dict(state, positions=None):
     return blob, d, fd, num_inputs
 
 
-def infer_float_dims(num_values, num_inputs=NUM_PIECE_TYPES * 64):
+def infer_float_dims(num_values, num_inputs=NUM_PIECE_INPUTS):
     """Recover (d, fd) from the value count of a float .bin written by serialize()."""
     per_d = (NUM_PIECE_TYPES * NUM_PIECE_TYPES * GRID * GRID
              + NUM_PIECE_TYPES * 64 + NUM_OUTPUTS * 2 * NUM_PIECE_TYPES * 64)
@@ -434,7 +481,7 @@ def infer_float_dims(num_values, num_inputs=NUM_PIECE_TYPES * 64):
     return found[0]
 
 
-def from_float_file(path, d=None, fd=None, num_inputs=NUM_PIECE_TYPES * 64):
+def from_float_file(path, d=None, fd=None, num_inputs=NUM_PIECE_INPUTS):
     """Pack a float .bin written by NetRelHD.serialize()."""
     raw = np.fromfile(path, dtype=np.float32)
     if d is None or fd is None:
@@ -661,6 +708,10 @@ def main():
                         help="Relative-conv block width; inferred when not given")
     parser.add_argument('--fd', type=int, default=None,
                         help="Full hidden-layer width; inferred when not given")
+    parser.add_argument('--num-inputs', type=int, default=NUM_PIECE_INPUTS,
+                        choices=SUPPORTED_NUM_INPUTS,
+                        help="Full layer inputs of a float .bin: 768, or 772 with the castling "
+                             "rights. A .pt checkpoint carries this in its shapes")
     parser.add_argument('--force', action='store_true', help="Overwrite the output if it exists")
     parser.add_argument('--check', action='store_true',
                         help="Simulate the written net on --positions and report its error "
@@ -692,7 +743,7 @@ def main():
     else:
         if args.check:
             sys.exit("--check needs a .pt checkpoint to compare against")
-        blob, d, fd, num_inputs = from_float_file(args.input, args.d, args.fd)
+        blob, d, fd, num_inputs = from_float_file(args.input, args.d, args.fd, args.num_inputs)
 
     with open(out, "wb") as f:
         f.write(blob)

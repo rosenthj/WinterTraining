@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from quantize import NUM_PIECE_INPUTS, CASTLING_MIRROR, SUPPORTED_NUM_INPUTS
+
 
 def tensor_to_bytes(x):
     return x.detach().to('cpu').flatten().numpy().tobytes()
@@ -491,7 +493,14 @@ class NetRelHD(nn.Module):
         self.c1 = nn.Conv2d(12, 12 * d, 15, padding=7, bias=False)
         self.b1 = nn.parameter.Parameter(data=torch.zeros((12 * d, 8, 8)))
         self.out = nn.Conv2d(2 * 12 * d, 3, 8, padding=0)
+        # The full layer reads the piece squares (768), optionally followed by the four
+        # castling rights (772). Anything else has no defined mirror image.
+        if num_inputs not in SUPPORTED_NUM_INPUTS:
+            raise ValueError(f"NetRelHD supports num_inputs in {SUPPORTED_NUM_INPUTS}, "
+                             f"got {num_inputs}")
         self.f_dim = num_inputs
+        # Columns the mirrored full layer reads its castling inputs from.
+        self.castling_mirror = [NUM_PIECE_INPUTS + i for i in CASTLING_MIRROR]
         self.f1 = nn.Linear(self.f_dim, fd)
         self.fout = nn.Linear(2 * fd, 3, bias=False)
 
@@ -535,6 +544,10 @@ class NetRelHD(nn.Module):
         fx = self.activation(self.f1(fx))
 
         fxm = x_mirror.view(-1, 12*8*8)
+        if self.f_dim > NUM_PIECE_INPUTS:
+            # Mirroring swaps the colours, so each side's castling rights move to the
+            # other side's columns along with its pieces. The wings stay as they are.
+            fxm = torch.cat([fxm, x_in[:, self.castling_mirror]], dim=1)
         fxm = self.activation(self.f1(fxm))
 
         return x, torch.cat([fx, fxm], dim=1)
