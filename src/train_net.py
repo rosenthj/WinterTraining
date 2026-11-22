@@ -41,7 +41,8 @@ def parse_args():
                         help="Directory holding features_desk_v*.npz / targets_desk_v*.npz")
     parser.add_argument('--datasets', type=str, nargs='+', default=None,
                         help="Datasets to train on: version tags (5, 100a), ranges (200-221), "
-                             "special names (vEnd), or 'all'. Newest variant always wins "
+                             "special names (vEnd), patterns ('Noisy*', quoted), or 'all'. "
+                             "Newest variant always wins "
                              "(e.g. 100 selects 100a if present).")
     parser.add_argument('--exclude', type=str, nargs='*', default=None,
                         help="Datasets to drop from the selection (same grammar as --datasets)")
@@ -51,7 +52,8 @@ def parse_args():
     parser.add_argument('--aux-datasets', type=str, nargs='+', default=None,
                         help="Auxiliary datasets to also train on, resolved against "
                              "--aux-data-dir. Same grammar as --datasets except 'all' is "
-                             "not allowed: auxiliary datasets are opt-in by name.")
+                             "not allowed: auxiliary datasets are opt-in by name. A "
+                             "pattern selects a set of them, e.g. 'Noisy*'.")
     parser.add_argument('--portion', type=float, default=1.0,
                         help="Fraction of each selected dataset to use (random subsample)")
     parser.add_argument('--aux-portion', type=float, default=None,

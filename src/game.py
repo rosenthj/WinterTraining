@@ -67,6 +67,16 @@ class ItGame:
                     (self._board.halfmove_clock or not self.__last_is_capture()) or not (
                         self.__next_is_check() or self.__next_is_capture()))
 
+    def is_noisy(self):
+        """Mid-exchange: the last move captured and the next one captures or checks.
+
+        These are the positions is_quiet rejects that Winter still evaluates. In-check
+        positions are rejected by both, since Winter never evaluates them, and so are
+        positions before an en passant capture, whose right the features cannot show.
+        """
+        return not self.in_check() and not self.__next_is_en_passant() and (
+            self.__last_is_capture() and (self.__next_is_check() or self.__next_is_capture()))
+
     def is_final_position(self):
         return len(self._umake) == 0
 

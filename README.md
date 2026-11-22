@@ -123,6 +123,8 @@ For each game (`data.py`):
   one-hot vector**:
   - `12 × 64 = 768` piece-square features (6 white piece types, then 6 black), plus
   - `4` castling-rights features (W queenside, W kingside, B queenside, B kingside).
+  - The castling columns are always stored; whether a net reads them is a training
+    option (see *Castling rights as inputs* below).
   - Positions are standardized to **white-to-move** (the board is mirrored and the result
     flipped if black is to move). Optional horizontal flip (when no castling rights) and
     vertical flip (when no pawns) are applied for augmentation/canonicalization.
@@ -307,6 +309,36 @@ Other useful flags: `--portion` (subsample each dataset), `--val-name` (validati
 `validation_games`), `--model`/`--d`/`--fd`/`--num-inputs` (architecture; defaults reproduce the
 deployed `NetRelHD(d=16, fd=64, num_inputs=768)`), `--load <ckpt>`, `--device N`, `--no-cuda`,
 `--lr-mult`, `--log-freq`.
+
+### Castling rights as inputs (`--num-inputs 772`)
+
+Every dataset row already carries the four castling rights in columns 768–771 (white
+queenside, white kingside, black queenside, black kingside), but the default
+`--num-inputs 768` leaves them unread. `--num-inputs 772` feeds them to the full layer of
+`NetRelHD` / `NetRelHDP` next to the piece squares, so no data has to be regenerated:
+
+```bash
+python train_net.py --name my_castling_net --num-inputs 772 --datasets all --exclude 0 vEnd ...
+```
+
+The mirrored half of the net sees the board from the other side, so it reads each right
+from the other colour's column (the wings stay as they are); `NetRelHD.features` does this
+swap. 768 and 772 are the only widths these two models accept.
+
+A net that reads these inputs takes every row at its word. Positions extracted from games
+always include some with rights, so a dataset in which *no* row has one was most likely
+built by a path that did not record them — every set currently in `datasets_aux/` is like
+that. With `--num-inputs 772` the trainer prints a warning naming each such file (and the
+validation set, if it is one) the first time it is loaded. Decide per dataset whether its
+positions really had no rights before training on it.
+
+The quantized export handles both widths. Neither the format version nor the layout
+changes: `f1` is stored as `(fd, num_inputs)`, so each of its rows grows by the four
+castling columns, the header's input count says which it is, and the accumulator scales
+allow for any combination of rights. Winter needs matching support to load such a net: add
+a right's column to the global accumulator while that right is held, with the mirrored half
+taking the column of the other colour's right on the same wing. A build without it rejects
+the file by its input count.
 
 ### Large datasets that don't fit in memory (`--reload-every`)
 

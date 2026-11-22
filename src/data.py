@@ -62,20 +62,30 @@ def get_max_quiet_entropy_pgn(model, pgn_filename):
     return entropy, fen
 
 
-def extract_fens_from_game(g):
-    """Extract fens from a game for training. Returns tuple of fens and final result."""
+def extract_fens_from_game(g, noisy=None):
+    """Extract fens from a game for training. Returns tuple of fens and final result.
+
+    If ``noisy`` is a list, every mid-exchange position (ItGame.is_noisy) is extracted as
+    well, in game order among the quiet samples, and ``noisy`` receives one flag per fen
+    saying which kind it is. The quiet sampling is unchanged by this.
+    """
     game = ItGame(g)
     game.to_start()
     lst = []
     cnt = 1 + np.random.randint(2)
     while not game.is_final_position():
         game.make_move()
+        if noisy is not None and game.is_noisy():
+            lst.append(game.fen())
+            noisy.append(True)
         cnt = cnt - 1
         if cnt == 0:
             if not game.is_quiet():
                 cnt = 2
             else:
                 lst.append(game.fen())
+                if noisy is not None:
+                    noisy.append(False)
                 cnt = 3
     return lst, g.headers["Result"]
 
@@ -198,7 +208,8 @@ def extract_data_from_game(g):
         # position. Checked before extracting fens, which is much the more expensive half.
         count.skipped_abnormal += 1
         return None
-    fens, res = extract_fens_from_game(g)
+    noisy = [] if config.positions == "noisy" else None
+    fens, res = extract_fens_from_game(g, noisy)
     if forfeit_board is not None and not any(is_tb_position(f) for f in fens):
         # Reached six pieces, but no position that survived sampling is probeable.
         count.skipped_abnormal += 1
@@ -208,7 +219,28 @@ def extract_data_from_game(g):
     # The repair is the only reason a forfeited game is usable, so it must not be subject to
     # tb_relabel_prob -- those games always take every probe.
     out = data_from_fen_res_set(fens, res, force_tb=forfeit_board is not None)
+    if noisy is not None:
+        out = keep_noisy(out, noisy)
     return subsample_game(out)
+
+
+def keep_noisy(out, noisy):
+    """Keep only the mid-exchange rows of one game's output.
+
+    The quiet positions are extracted and walked too, then dropped, so the labels come
+    from the same backward walk a regular conversion runs: the tablebase entry into the
+    endgame, whose result labels every earlier position, is looked for among the quiet
+    positions as usual (and among the noisy ones, which can only move it earlier).
+    """
+    if out is None:
+        return None
+    # data_from_fen_res_set walks the game backwards, so its rows are in reverse order.
+    idx = np.flatnonzero(np.asarray(noisy[::-1], dtype=bool))
+    if len(idx) == 0:
+        return None
+    count.noisy_positions += len(idx)
+    features, results = out
+    return features[idx], results[idx]
 
 
 def subsample_game(out):

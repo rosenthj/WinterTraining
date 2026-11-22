@@ -1,4 +1,5 @@
 import argparse
+import os
 import re
 import zlib
 
@@ -45,6 +46,19 @@ def main():
                              "a game, and so no two share a result -- a few hundred thousand "
                              "such positions carry far more information than the same number "
                              "drawn from a handful of games.")
+    parser.add_argument('--positions', choices=["quiet", "noisy"], default="quiet",
+                        help="Which positions to keep. 'quiet' (default) is the training data. "
+                             "'noisy' keeps only the mid-exchange positions the quiet filter "
+                             "drops (the last move captured and the next one captures or "
+                             "checks; never in check), labelled exactly as a regular conversion "
+                             "would label them. Meant for an auxiliary dataset: write it "
+                             "outside ../datasets/ so --datasets all never picks it up.")
+    parser.add_argument('--out-name', type=str, default=None,
+                        help="Full name of the written dataset (features_<out-name>.npz), "
+                             "replacing <name><out-suffix>. For converting a single PGN, e.g. "
+                             "--name desk_v310 --positions noisy --out-dir ../datasets_aux/ "
+                             "--out-name desk_vNoisy310. Not for shard conversions, where every "
+                             "shard would write the same file.")
     parser.add_argument('--seed', type=int, default=None,
                         help="Seed the position sampling, the horizontal/vertical flips and "
                              "the tablebase relabel draws, making the dataset reproducible. "
@@ -65,6 +79,13 @@ def main():
     config.tb_relabel_prob = args.tb_relabel_prob
     config.drop_abnormal = args.drop_abnormal
     config.positions_per_game = args.positions_per_game
+    config.positions = args.positions
+    if args.out_name is not None and args.out_suffix:
+        parser.error("--out-name already is the full dataset name; drop --out-suffix")
+    out_name = args.out_name if args.out_name is not None else args.name + args.out_suffix
+    if args.positions == "noisy" and os.path.abspath(args.out_dir) == os.path.abspath("./../datasets/"):
+        print("WARNING: writing a --positions noisy dataset into ../datasets/, where "
+              "--datasets all would train on it as regular data. Use --out-dir ../datasets_aux/.")
 
     if args.seed is not None:
         # Every draw in the conversion path goes through numpy's global RNG (data.py is the
@@ -86,11 +107,13 @@ def main():
 
     config.tablebase = chess.syzygy.open_tablebase(args.tablebase)
     gen_dataset_helper(args.name, save=True, pgn_dir=args.pgn_dir, out_dir=args.out_dir,
-                       out_name=args.name + args.out_suffix)
+                       out_name=out_name)
     config.tablebase.close()
     print(f"TB Queries: {count.total_tb_queries}")
     print(f"Results changed by TB Query: {count.tb_changed}")
     print(f"Games skipped (regular starting position): {count.skipped_startpos}")
+    if config.positions == "noisy":
+        print(f"Mid-exchange positions kept: {count.noisy_positions}")
     if count.rejected:
         total = sum(count.rejected.values())
         print(f"Games rejected as unusable: {total} of {count.total_games}")

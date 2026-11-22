@@ -1,3 +1,4 @@
+import fnmatch
 import glob
 import os
 import re
@@ -53,6 +54,11 @@ def _strip_v(token):
     return token[1:] if token.startswith("v") else token
 
 
+def _natural_key(tag):
+    """Sort key that orders the numbers inside a tag by value: Noisy2 before Noisy10."""
+    return [int(part) if part.isdigit() else part for part in re.split(r'(\d+)', tag)]
+
+
 def select_dataset_tags(tokens, available_tags, exclude=None, warn=print):
     """Resolve CLI selection ``tokens`` against the datasets actually present.
 
@@ -61,7 +67,10 @@ def select_dataset_tags(tokens, available_tags, exclude=None, warn=print):
       * a range ``200-221`` -- every numeric version in the inclusive range;
       * a version ``5`` / ``100a`` -- that version, always resolved to its newest
         variant (so ``100`` and ``100a`` both select ``100a``);
-      * a special name ``End`` / ``vEnd`` -- a non-numeric dataset.
+      * a special name ``End`` / ``vEnd`` -- a non-numeric dataset;
+      * a pattern ``Noisy*`` -- every dataset whose tag matches it (shell-style ``*``,
+        ``?`` and ``[...]``, case-sensitive), numeric versions resolved to their newest
+        variant. Quote it on the command line so the shell leaves it alone.
 
     A leading ``v`` is optional on any token. Missing datasets are warned about and
     skipped. The result preserves selection order and removes duplicates and anything
@@ -74,6 +83,17 @@ def select_dataset_tags(tokens, available_tags, exclude=None, warn=print):
         if token.lower() == "all":
             return [numeric[base][1] for base in sorted(numeric)]
         token = _strip_v(token)
+        if any(c in token for c in "*?["):
+            matched = [tag for tag in available_tags if fnmatch.fnmatchcase(tag, token)]
+            out = []
+            for tag in sorted(matched, key=_natural_key):
+                m = _VERSION_RE.match(tag)
+                tag = numeric[int(m.group(1))][1] if m else tag
+                if tag not in out:
+                    out.append(tag)
+            if not out:
+                warn(f"No dataset matches '{token}', skipping")
+            return out
         if "-" in token:
             lo, hi = token.split("-", 1)
             if lo.isdigit() and hi.isdigit():

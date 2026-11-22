@@ -11,3 +11,5 @@ repaired_abnormal = 0
 rejected = collections.Counter()
 # Games whose Result disagreed with a terminal final position and was corrected from it.
 relabelled_terminal = 0
+# Mid-exchange positions kept by a --positions noisy conversion (data.keep_noisy).
+noisy_positions = 0

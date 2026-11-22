@@ -17,4 +17,8 @@ drop_abnormal = False
 # in which no two positions share a game, and therefore a result. See
 # data.extract_data_from_game.
 positions_per_game = 0
+# Which positions a conversion keeps: "quiet" (the training default, game.ItGame.is_quiet)
+# or "noisy", the mid-exchange positions that filter drops (game.ItGame.is_noisy), for an
+# auxiliary dataset. See data.keep_noisy.
+positions = "quiet"
 # activation_hook = None

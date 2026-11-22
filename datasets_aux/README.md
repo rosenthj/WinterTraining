@@ -14,4 +14,6 @@ python train_net.py --datasets 1-221 --aux-datasets <tag> ...
 
 `--aux-datasets` uses the same tag grammar as `--datasets` (resolved against
 `--aux-data-dir`, default this directory), except `all` is deliberately
-rejected — each auxiliary dataset must be named individually.
+rejected — each auxiliary dataset must be named individually. A family of
+datasets can be named at once with a shell-style pattern, quoted so the shell
+leaves it alone: `--aux-datasets 'Noisy*'` selects `Noisy1`, `Noisy2`, ....

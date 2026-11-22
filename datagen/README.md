@@ -93,6 +93,49 @@ endgame overwrites the recorded result for every earlier position. Drawing a
 position first and labelling it on its own would disagree with how training
 labels that same position.
 
+### Building a mid-exchange (noisy) auxiliary dataset
+
+The training extractor keeps only quiet positions (`ItGame.is_quiet`): it drops a
+position when the previous move was a capture and the next one is a capture or a
+check, i.e. in the middle of an exchange. Winter's search still evaluates those
+positions, in quiescence search above all. `--positions noisy` converts the same
+shards a second time and keeps exactly those dropped positions; in-check positions
+(never evaluated by Winter) and positions before an en passant capture stay out.
+Nothing in the engine changes.
+
+Write the shard datasets to their own directory, since a shard's file name does not
+depend on the mode and the worker skips shards whose output already exists:
+
+```bash
+# 2''. Convert the shards again, keeping only mid-exchange positions
+SHARD_DATASET_DIR="$PWD/data/shards_noisy" \
+CONVERT_ARGS="--drop-abnormal --positions noisy" ./submit_convert.sh winter_v1
+
+# 3''. Merge into datasets_aux/, which --datasets all never reads
+cd ../src
+python merge_datasets.py --glob '../datagen/data/shards_noisy/features_winter_v1_shard*.npz' \
+                         --out-dir ../datasets_aux/ --base-name desk_vNoisy --start-version 1
+```
+
+Train on the whole set with `--aux-datasets 'Noisy*'` (quoted, so the shell passes the
+pattern through) and set its share of each batch with `--aux-portion`. A single local PGN converts directly:
+`python pgn_to_dataset.py --name desk_v310 --drop-abnormal --positions noisy
+--out-dir ../datasets_aux/ --out-name desk_vNoisy310`.
+
+Size: about one noisy row for every three quiet rows (13.2k against 39.7k on 1,500
+games of `desk_v305`), since about 9% of plies are mid-exchange and every one of them
+is kept, where quiet positions are sampled every third ply or so.
+
+Labels: the quiet positions are still extracted and walked, then dropped, so each
+noisy position gets its result from the same backward walk as the quiet positions of
+its game, tablebase entry included. A noisy position with six or fewer pieces is
+probed itself, which also resolves the pending recapture. With `--seed`, the default
+`--positions quiet` output is identical to what the converter wrote before this
+option existed.
+
+For a matching validation set, add `--positions-per-game 1 --seed 0`; that keeps one
+noisy position per game.
+
 ### Why shards, not one big PGN
 
 A 475k-game PGN takes roughly 1.8 hours of local-equivalent conversion, against
